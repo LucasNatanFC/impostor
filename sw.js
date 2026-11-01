@@ -1,6 +1,6 @@
 // Service worker simples: sempre busca a versão mais nova na rede e guarda uma cópia
 // para abrir o app mesmo com a internet oscilando. (O jogo em si precisa de internet.)
-const CACHE = 'impostor-v3';
+const CACHE = 'impostor-v4';
 
 self.addEventListener('install', () => self.skipWaiting());
 

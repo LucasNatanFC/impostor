@@ -237,7 +237,85 @@ try {
     check(v?.kind === 'missed' && v.text === expected, `${p.name} vê "${v?.text}"`);
   }
   const t4 = await tallyOf(host);
-  check(t4[X] === 5 && t4[Y] === 1, `placar com 6 pessoas (${JSON.stringify(t4)})`);
+  check(t4[X] === 5 && t4[Y] === 1, `placar com 6 pessoas, cada um circulando só 1 nome (${JSON.stringify(t4)})`);
+
+  console.log('\n13b. Voto em mais de um com 2 impostores');
+  const optState = (p) => p.page.$$eval('[data-act=vote]', (els) => Object.fromEntries(els.map((b) => [
+    b.querySelector('.nm').textContent.trim(),
+    b.getAttribute('aria-checked') === 'true' ? 'on' : b.getAttribute('aria-disabled') === 'true' ? 'off' : '',
+  ])));
+  async function unvote(p, name) {
+    const opt = await p.page.waitForFunction((n) => [...document.querySelectorAll('[data-act=vote]')]
+      .find((b) => b.querySelector('.nm').textContent.trim() === n), {}, name);
+    await opt.asElement().click();
+    await p.page.waitForFunction((n) => [...document.querySelectorAll('[data-act=vote]')]
+      .find((b) => b.querySelector('.nm').textContent.trim() === n)?.getAttribute('aria-checked') === 'false', {}, name);
+  }
+  const voteMany = async (p, names) => { for (const n of names) await vote(p, n); };
+
+  await click(host, '[data-act=start]');
+  const c5 = await cards(everyone, 5);
+  const r5 = checkRound(c5, 2, 'rodada 5');
+  const [P1, P2] = r5.impostors;
+  const inn5 = everyone.filter((p) => !r5.impostors.includes(p.name)).map((p) => p.name);
+  const civ5 = everyone.find((p) => p !== host && inn5.includes(p.name));
+  check((await text(civ5, '[data-imp-count]')) === 'Nesta rodada são 2 impostores. Na votação, dá pra circular até 2 nomes.', 'a rodada avisa que são 2 impostores');
+  await click(host, '[data-act=vote-open]');
+  for (const p of everyone) await p.page.waitForSelector('.screen--vote');
+  check((await text(civ5, '.vote-q')) === 'Quem são os impostores?' && (await text(civ5, '[data-myvote]')) === 'Circule até 2 nomes.', 'a votação pede até 2 nomes');
+  const others5 = everyone.filter((p) => p !== civ5).map((p) => p.name);
+  await vote(civ5, others5[0]);
+  check((await text(civ5, '[data-progress]'))?.startsWith('Dá pra circular mais 1.'), 'depois de 1 nome, avisa que dá pra circular mais 1');
+  await vote(civ5, others5[1]);
+  const full = await optState(civ5);
+  check(full[others5[0]] === 'on' && full[others5[1]] === 'on' && others5.slice(2).every((n) => full[n] === 'off'), 'com 2 circulados, os outros nomes ficam bloqueados');
+  await civ5.page.evaluate((n) => [...document.querySelectorAll('[data-act=vote]')].find((b) => b.querySelector('.nm').textContent.trim() === n).click(), others5[2]);
+  await sleep(300);
+  check((await optState(civ5))[others5[2]] === 'off', 'tocar num terceiro nome não faz nada');
+  await sleep(300);
+  await shot(civ5, '17-voto-multiplo');
+  await unvote(civ5, others5[0]);
+  check((await optState(civ5))[others5[2]] === '', 'desmarcar um nome libera os outros de novo');
+  await unvote(civ5, others5[1]);
+  await waitVoted(host, 0, 6);
+  check(true, 'quem desmarca tudo volta a contar como "não votou"');
+
+  // Rodada 5: a roda pega só um dos dois.
+  const [I1, I2] = inn5;
+  for (const p of everyone) {
+    if (p.name === P1 || p.name === P2) await voteMany(p, [I1, I2]);
+    else await voteMany(p, p.name === I1 ? [P1, I2] : [P1, I1]);
+  }
+  await waitVoted(host, 6, 6);
+  await click(host, '[data-act=reveal]');
+  for (const p of everyone) {
+    const v = await verdictOf(p);
+    const expected = p.name === P1 ? 'Pegaram você!' : p.name === P2 ? 'Você escapou!' : 'A roda pegou 1 de 2 impostores.';
+    check(v?.kind === 'partial' && v.text === expected, `${p.name} vê "${v?.text}"`);
+  }
+  const t5 = await tallyOf(host);
+  check(t5[P1] === 4 && t5[I1] === 5 && t5[I2] === 3, `cada nome circulado conta 1 voto (${JSON.stringify(t5)})`);
+  await sleep(800);
+  await shot(civ5, '18-resultado-parcial', true);
+
+  // Rodada 6: a roda pega os dois.
+  await click(host, '[data-act=start]');
+  const c6 = await cards(everyone, 6);
+  const r6 = checkRound(c6, 2, 'rodada 6');
+  const inn6 = everyone.filter((p) => !r6.impostors.includes(p.name)).map((p) => p.name);
+  await click(host, '[data-act=vote-open]');
+  for (const p of everyone) await p.page.waitForSelector('.screen--vote');
+  for (const p of everyone) {
+    if (r6.impostors.includes(p.name)) await voteMany(p, [p.name === r6.impostors[0] ? inn6[0] : inn6[1]]);
+    else await voteMany(p, r6.impostors);
+  }
+  await waitVoted(host, 6, 6);
+  await click(host, '[data-act=reveal]');
+  for (const p of everyone) {
+    const v = await verdictOf(p);
+    const expected = r6.impostors.includes(p.name) ? 'Pegaram você!' : 'A roda pegou os impostores!';
+    check(v?.kind === 'caught' && v.text === expected, `${p.name} vê "${v?.text}"`);
+  }
 
   console.log('\n14. Sair da sala e encerrar');
   await click(edu, '[data-act=menu]');

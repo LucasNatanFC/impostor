@@ -9,8 +9,8 @@ Quem cria a sala mostra um QR code no próprio celular. Os outros apontam a câm
 1. Quem cria a sala mostra o QR code. Cada pessoa escaneia e entra com o nome.
 2. Todo mundo recebe a mesma palavra. Menos o impostor, que só fica sabendo que é o impostor (e, se a dica estiver ligada, o tema da palavra).
 3. Começando por quem o app indicar e seguindo a roda, cada um fala uma palavra ligada à sua, sem entregar demais.
-4. Depois de uma ou duas voltas, quem criou a sala toca em **Abrir votação** e cada um vota no próprio celular, circulando o nome de quem acha que é o impostor. Dá pra mudar o voto até a revelação, e ninguém vê em quem o outro votou.
-5. Em **Revelar resultado**, todos os celulares mostram quem era o impostor, a palavra, o placar de votos e se a roda acertou. Empate é ponto pro impostor. Se a roda acertar, o impostor ainda pode tentar adivinhar a palavra pra roubar a vitória.
+4. Depois de uma ou duas voltas, quem criou a sala toca em **Abrir votação** e cada um vota no próprio celular, circulando o nome de quem acha que é o impostor. Com 2 ou mais impostores, dá pra circular até esse número de nomes. Dá pra mudar o voto até a revelação, e ninguém vê em quem o outro votou.
+5. Em **Revelar resultado**, todos os celulares mostram quem era o impostor, a palavra, o placar de votos e se a roda acertou. Os mais votados, um por impostor, são os acusados: com 2 impostores, a roda pode pegar os dois, só um ou nenhum. Empate na linha de corte não acusa ninguém e é ponto pro impostor. Se a roda acertar, o impostor ainda pode tentar adivinhar a palavra pra roubar a vitória.
 
 Se a turma preferir votar apontando o dedo, dá pra pular a votação e tocar em **Revelar sem votar**.
 
@@ -58,7 +58,7 @@ npm run dev   # app em http://127.0.0.1:8080/?broker=ws://127.0.0.1:9001 (broker
 npm test      # simula o anfitrião e mais 4 ou 5 jogadores e confere o jogo inteiro
 ```
 
-O teste confere: entrada pelo convite, um impostor por rodada (e dois com 6 pessoas), mesma palavra pra todo o resto, quem começa, palavra nova a cada rodada, votação (roda acerta, roda erra, empate, mudar o voto, não votar em si mesmo, recarregar no meio), revelação com placar, tirar alguém e deixar voltar, quem chega atrasado não vota, sair, encerrar a sala e se dá pra espiar cartas ou votos pelo broker (não dá). O do modo juiz confere o sorteio e o rodízio do juiz, a palavra e o tema escritos por ele, a sugestão, passar a vez, sortear outro juiz, o anfitrião como juiz, tirar o juiz no meio da escolha, a votação sem o juiz e o sigilo da palavra dele.
+O teste confere: entrada pelo convite, um impostor por rodada (e dois com 6 pessoas), mesma palavra pra todo o resto, quem começa, palavra nova a cada rodada, votação (roda acerta, roda erra, empate, mudar o voto, não votar em si mesmo, recarregar no meio, circular até 2 nomes com 2 impostores, pegar os dois ou só um), revelação com placar, tirar alguém e deixar voltar, quem chega atrasado não vota, sair, encerrar a sala e se dá pra espiar cartas ou votos pelo broker (não dá). O do modo juiz confere o sorteio e o rodízio do juiz, a palavra e o tema escritos por ele, a sugestão, passar a vez, sortear outro juiz, o anfitrião como juiz, tirar o juiz no meio da escolha, a votação sem o juiz e o sigilo da palavra dele.
 
 ## Personalizar
 

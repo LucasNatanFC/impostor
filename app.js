@@ -41,6 +41,11 @@ const judgeOn = (H) => !!H?.settings?.judge;
 const minPlayers = (H) => MIN_PLAYERS + (judgeOn(H) ? 1 : 0);
 const maxImpFor = (H) => maxImpostors(H.players.length - (judgeOn(H) ? 1 : 0));
 const inPlay = (r) => r.participants.filter((id) => id !== r.judge);
+
+// Voto pode ser um nome (versão antiga) ou uma lista de nomes.
+const asList = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+// Em quantos nomes cada um pode votar: um por impostor da rodada.
+const voteLimit = (r) => Math.max(1, r?.imps ?? r?.impostors?.length ?? 1);
 const brokerUrl = (b) => (typeof b === 'number' ? (BROKERS[b] ?? BROKERS[0]) : b);
 const nameIn = (players, id) => players.find((p) => p.id === id)?.name ?? 'alguém';
 
@@ -191,7 +196,14 @@ async function publishState() {
       first: r.first,
       phase: r.phase,
       ...(r.judge ? { judge: r.judge, draw: r.draw } : {}),
-      ...(r.phase === 'voting' ? { voted: { ...(r.vseq || {}) } } : {}),
+      // Quantos impostores tem a rodada (não quem): com 2 ou mais, cada um vota em até esse número.
+      ...(r.phase === 'playing' || r.phase === 'voting' ? { imps: r.impostors.length } : {}),
+      ...(r.phase === 'voting'
+        ? {
+          voted: Object.fromEntries(Object.entries(r.vseq || {}).filter(([id]) => asList(r.votes?.[id]).length)),
+          acks: { ...(r.vseq || {}) }, // última versão do voto que chegou de cada um (inclui quem desmarcou tudo)
+        }
+        : {}),
       ...(r.phase === 'reveal' ? { impostors: r.impostors, word: r.word, cat: r.cat, votes: r.votes || {} } : {}),
     },
   };
@@ -263,12 +275,16 @@ async function hostOnMessage(topic, text) {
     // O voto vem cifrado com a chave só nossa e do jogador: ninguém mais lê antes da revelação.
     let v;
     try { v = await unseal(await sharedFor(p), m.box); } catch { return; }
-    if (v?.n !== r.n || v.target === m.id || v.target === r.judge || !r.participants.includes(v.target)) return;
+    if (v?.n !== r.n) return;
+    const targets = [...new Set(Array.isArray(v.targets) ? v.targets : asList(v.target))];
+    const valid = (t) => t !== m.id && t !== r.judge && r.participants.includes(t);
+    if (targets.length > voteLimit(r) || !targets.every(valid)) return;
     const seq = Number.isFinite(v.seq) ? v.seq : 0;
     r.vseq ??= {};
     if (seq < (r.vseq[m.id] ?? -1)) return; // voto antigo que chegou atrasado
-    if (r.votes[m.id] !== v.target || r.vseq[m.id] !== seq) {
-      r.votes[m.id] = v.target;
+    if (JSON.stringify(asList(r.votes[m.id])) !== JSON.stringify(targets) || r.vseq[m.id] !== seq) {
+      if (targets.length) r.votes[m.id] = targets;
+      else delete r.votes[m.id];
       r.vseq[m.id] = seq;
       saveHost();
       render();
@@ -568,7 +584,18 @@ function votePending() {
   const r = S.view?.round;
   if (!v || r?.phase !== 'voting' || r.n !== v.n) return false;
   if (Array.isArray(r.voted)) return !r.voted.includes(S.me.id);
-  return r.voted?.[S.me.id] !== v.seq;
+  return (r.acks || r.voted)?.[S.me.id] !== v.seq;
+}
+
+// Meu voto atual nesta rodada (lista de nomes circulados).
+const myTargets = (r) => (S.me?.vote?.n === r.n ? asList(S.me.vote.targets ?? S.me.vote.target) : []);
+
+// Circular/descircular um nome. Com 1 impostor, trocar de nome; com mais, até o limite.
+// Devolve null quando não muda nada (ex.: já circulou o máximo).
+function toggleVote(cur, target, limit) {
+  if (limit <= 1) return cur[0] === target ? null : [target];
+  if (cur.includes(target)) return cur.filter((t) => t !== target);
+  return cur.length < limit ? [...cur, target] : null;
 }
 
 function wordPending() {
@@ -593,7 +620,7 @@ async function sendVote() {
   const r = S.view?.round;
   if (!v || r?.phase !== 'voting' || r.n !== v.n || !hostKey || !net) return;
   lastVote = Date.now();
-  const box = await seal(hostKey, { n: v.n, target: v.target, seq: v.seq });
+  const box = await seal(hostKey, { n: v.n, targets: asList(v.targets ?? v.target), seq: v.seq });
   net.publish(T.inbox, await seal(roomKey, { t: 'vote', id: S.me.id, box }), false);
   scheduleRetry();
 }
@@ -612,7 +639,10 @@ async function castVote(target) {
   if (S.mode === 'host') {
     const r = S.host?.round;
     if (r?.phase !== 'voting' || S.host.id === r.judge || target === S.host.id || target === r.judge || !r.participants.includes(target)) return;
-    r.votes[S.host.id] = target;
+    const next = toggleVote(asList(r.votes[S.host.id]), target, voteLimit(r));
+    if (!next) return;
+    if (next.length) r.votes[S.host.id] = next;
+    else delete r.votes[S.host.id];
     r.vseq ??= {};
     r.vseq[S.host.id] = (r.vseq[S.host.id] ?? 0) + 1;
     saveHost();
@@ -622,8 +652,10 @@ async function castVote(target) {
   }
   const r = S.view?.round;
   if (r?.phase !== 'voting' || S.me.id === r.judge || target === S.me.id || target === r.judge || !r.participants.includes(target)) return;
+  const next = toggleVote(myTargets(r), target, voteLimit(r));
+  if (!next) return;
   const seq = S.me.vote?.n === r.n ? (S.me.vote.seq ?? 0) + 1 : 1;
-  S.me.vote = { n: r.n, target, seq };
+  S.me.vote = { n: r.n, targets: next, seq };
   saveMe();
   render();
   await sendVote();
@@ -960,9 +992,11 @@ function viewRound(isHost) {
   const card = isHost ? cardFor(S.host.id) : S.card?.n === r.n ? S.card : null;
   const first = r.first === myId ? 'Você começa.' : `Quem começa: ${esc(nameIn(players, r.first))}.`;
   const iJudge = r.judge === myId;
+  const nImp = voteLimit(r);
   const how = iJudge
     ? 'Você é o juiz: está fora desta rodada. Acompanhe as dicas e, no fim, confira se o impostor acerta a palavra.'
     : 'Cada um fala uma palavra ligada à sua, seguindo a roda. Depois de uma ou duas voltas, abram a votação.';
+  const impNote = nImp > 1 ? `<p class="muted" data-imp-count>Nesta rodada são ${nImp} impostores. Na votação, dá pra circular até ${nImp} nomes.</p>` : '';
   return `
   <section class="screen screen--round" data-round="${r.n}">
     <header class="top"><h1 class="title">${iJudge ? `Rodada ${r.n}: você é o juiz` : `Rodada ${r.n}`}</h1>${menuButton()}</header>
@@ -970,6 +1004,7 @@ function viewRound(isHost) {
     <div class="stack-tight">
       <p class="first" data-first>${first}</p>
       <p class="muted">${how}</p>
+      ${impNote}
       ${r.judge && !iJudge ? `<p class="muted" data-judge-note>${esc(nameIn(players, r.judge))} é o juiz e está fora desta rodada.</p>` : ''}
     </div>
     ${isHost
@@ -1003,8 +1038,11 @@ function viewVote(isHost) {
   const myId = isHost ? S.host.id : S.me.id;
   const iJudge = r.judge === myId;
   const present = (id) => players.some((p) => p.id === id);
-  const myVote = isHost ? r.votes?.[myId] : S.me.vote?.n === r.n ? S.me.vote.target : null;
-  const voted = isHost ? Object.keys(r.votes || {}) : votedIds(r);
+  const limit = voteLimit(r);
+  const multi = limit > 1;
+  const mine = isHost ? asList(r.votes?.[myId]) : myTargets(r);
+  const full = multi && mine.length >= limit;
+  const voted = isHost ? Object.keys(r.votes || {}).filter((id) => asList(r.votes[id]).length) : votedIds(r);
   const voters = inPlay(r).filter(present); // o juiz não vota nem recebe voto
   const done = voters.filter((id) => voted.includes(id));
   const missing = voters.filter((id) => !voted.includes(id)).map((id) => (id === myId ? 'você' : nameIn(players, id)));
@@ -1024,14 +1062,21 @@ function viewVote(isHost) {
        </div></div>
        <p class="muted" data-progress>${progress}</p>`
     : `<div class="paper"><div class="slip slip--vote">
-         <p class="vote-q" id="vote-q">Quem é o impostor?</p>
-         <ul class="vote-list" role="radiogroup" aria-labelledby="vote-q">
-           ${options.map((id) => `<li><button type="button" class="vote-opt" role="radio" aria-checked="${myVote === id}" data-act="vote" data-id="${esc(id)}"><span class="nm">${esc(nameIn(players, id))}</span></button></li>`).join('')}
+         <p class="vote-q" id="vote-q">${multi ? 'Quem são os impostores?' : 'Quem é o impostor?'}</p>
+         <ul class="vote-list" role="${multi ? 'group' : 'radiogroup'}" aria-labelledby="vote-q">
+           ${options.map((id) => {
+             const on = mine.includes(id);
+             const off = full && !on; // já circulou o máximo: só dá pra desmarcar
+             return `<li><button type="button" class="vote-opt" role="${multi ? 'checkbox' : 'radio'}" aria-checked="${on}"${off ? ' aria-disabled="true"' : ''} data-act="vote" data-id="${esc(id)}"><span class="nm">${esc(nameIn(players, id))}</span></button></li>`;
+           }).join('')}
          </ul>
        </div></div>
        <div class="stack-tight">
-         <p class="first" data-myvote>${myVote ? `Seu voto: ${esc(nameIn(players, myVote))}.` : 'Toque em quem você acha que é o impostor.'}</p>
-         <p class="muted" data-progress>${myVote ? 'Dá pra mudar até a revelação. ' : ''}${progress}</p>
+         <p class="first" data-myvote>${mine.length
+           ? `Seu voto: ${esc(joinNames(mine.map((id) => nameIn(players, id))))}.`
+           : multi ? `Circule até ${limit} nomes.` : 'Toque em quem você acha que é o impostor.'}</p>
+         <p class="muted" data-progress>${!mine.length ? '' : !multi ? 'Dá pra mudar até a revelação. '
+           : full ? 'Pra trocar, toque num nome circulado. ' : `Dá pra circular mais ${limit - mine.length}. `}${progress}</p>
        </div>`;
 
   return `
@@ -1048,30 +1093,53 @@ function viewVote(isHost) {
   </section>`;
 }
 
-// Placar da votação: quem levou quantos votos, quem foi o mais votado e se a roda acertou.
+// Placar da votação. Com N impostores, os N mais votados são os "acusados"; se houver
+// empate bem na linha de corte, os empatados nessa linha não contam como acusados.
+// Resultado: pegou todos ('caught'), só parte ('partial'), nenhum ('missed') ou empate ('tie').
 function tally(r) {
+  const k = Math.max(1, r.impostors.length);
   const byTarget = new Map();
-  for (const [voter, target] of Object.entries(r.votes || {})) {
-    if (!byTarget.has(target)) byTarget.set(target, []);
-    byTarget.get(target).push(voter);
+  for (const [voter, v] of Object.entries(r.votes || {})) {
+    for (const target of asList(v)) {
+      if (!byTarget.has(target)) byTarget.set(target, []);
+      byTarget.get(target).push(voter);
+    }
   }
   const rows = [...byTarget].map(([target, voters]) => ({ target, voters }))
     .sort((a, b) => b.voters.length - a.voters.length);
-  if (!rows.length) return { rows, verdict: null, leader: null };
-  const leaders = rows.filter((x) => x.voters.length === rows[0].voters.length);
-  if (leaders.length > 1) return { rows, verdict: 'tie', leader: null };
-  const leader = leaders[0].target;
-  return { rows, verdict: r.impostors.includes(leader) ? 'caught' : 'missed', leader };
+  if (!rows.length) return { rows, verdict: null, accused: [], caught: [] };
+  let accused = rows.slice(0, k);
+  if (rows.length > k && rows[k].voters.length === rows[k - 1].voters.length) {
+    const cut = rows[k - 1].voters.length;
+    accused = accused.filter((x) => x.voters.length > cut);
+  }
+  accused = accused.map((x) => x.target);
+  const caught = accused.filter((id) => r.impostors.includes(id));
+  let verdict;
+  if (caught.length === r.impostors.length) verdict = 'caught';
+  else if (caught.length) verdict = 'partial';
+  else verdict = accused.length ? 'missed' : 'tie';
+  return { rows, verdict, accused, caught };
 }
 
 function verdictFor(r, t, myId) {
   if (!t.verdict) return null;
-  const multi = r.impostors.length > 1;
+  const k = r.impostors.length;
+  const multi = k > 1;
   const imIt = r.impostors.includes(myId);
+  const gotMe = t.caught.includes(myId);
   if (t.verdict === 'caught') {
-    if (t.leader === myId) return ['Pegaram você!', 'Ainda dá pra roubar a vitória: tente adivinhar a palavra.'];
-    if (imIt) return ['Pegaram o outro impostor.', 'Mas você escapou!'];
-    return [multi ? 'A roda pegou um impostor!' : 'A roda acertou!', 'O impostor ainda pode tentar adivinhar a palavra pra roubar a vitória.'];
+    if (gotMe) return ['Pegaram você!', 'Ainda dá pra roubar a vitória: tente adivinhar a palavra.'];
+    return multi
+      ? ['A roda pegou os impostores!', 'Eles ainda podem tentar adivinhar a palavra pra roubar a vitória.']
+      : ['A roda acertou!', 'O impostor ainda pode tentar adivinhar a palavra pra roubar a vitória.'];
+  }
+  if (t.verdict === 'partial') {
+    const got = t.caught.length;
+    const free = k - got;
+    if (gotMe) return ['Pegaram você!', free === 1 ? 'Mas um impostor escapou.' : `Mas ${free} impostores escaparam.`];
+    if (imIt) return ['Você escapou!', got === 1 ? 'Pegaram um impostor, mas não você.' : `Pegaram ${got} impostores, mas não você.`];
+    return [`A roda pegou ${got} de ${k} impostores.`, free === 1 ? 'Um escapou.' : `${free} escaparam.`];
   }
   if (t.verdict === 'missed') {
     if (imIt) return ['Você enganou a roda!', 'A roda votou em quem não era. Ponto pro impostor.'];
@@ -1351,8 +1419,8 @@ const RULES = `
     <li>Quem cria a sala mostra o QR code. Cada pessoa aponta a câmera do celular e entra com o nome.</li>
     <li>A cada rodada, todo mundo recebe a mesma palavra. Menos o impostor, que só fica sabendo que é o impostor.</li>
     <li>Começando por quem o app indicar e seguindo a roda, cada um fala uma palavra ligada à sua, sem entregar demais.</li>
-    <li>Depois de uma ou duas voltas, quem criou a sala abre a votação e cada um vota no celular em quem acha que é o impostor. Os votos ficam secretos até a revelação.</li>
-    <li>Se o mais votado for o impostor, a roda acertou. Mas ele ainda pode tentar adivinhar a palavra pra roubar a vitória. Empate é ponto pro impostor.</li>
+    <li>Depois de uma ou duas voltas, quem criou a sala abre a votação e cada um vota no celular em quem acha que é o impostor. Com 2 ou mais impostores, dá pra circular até esse número de nomes. Os votos ficam secretos até a revelação.</li>
+    <li>Os mais votados (um por impostor) são os acusados. Se o acusado for o impostor, a roda acertou. Mas ele ainda pode tentar adivinhar a palavra pra roubar a vitória. Empate é ponto pro impostor.</li>
   </ol>
   <p><strong>Com juiz:</strong> a cada rodada alguém é sorteado pra escrever a palavra e fica de fora. O juiz não recebe palavra e não vota, mas sabe quem é o impostor. Todo mundo é juiz uma vez antes de alguém repetir.</p>
   <button class="btn btn-primary" type="button" data-ret="ok">Entendi</button>`;

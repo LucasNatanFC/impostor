@@ -821,6 +821,11 @@ button {
   pointer-events: none;
 }
 
+.vote-opt[aria-disabled='true'] {
+  color: var(--grafite);
+  opacity: 0.55;
+}
+
 .vote-opt:focus-visible {
   outline-offset: -3px;
 }
