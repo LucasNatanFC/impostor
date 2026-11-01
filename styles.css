@@ -52,6 +52,8 @@
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
+  /* ao rolar até um botão (teclado, leitor de tela), ele não fica escondido atrás da barra fixa */
+  scroll-padding-bottom: 7.5rem;
 }
 
 body {
@@ -727,6 +729,37 @@ button {
   color: var(--grafite);
 }
 
+/* ---------- modo juiz ---------- */
+
+.slip--judge {
+  min-height: 8rem;
+}
+
+.face--judge {
+  gap: 0.2rem;
+}
+
+.judge-imp {
+  margin-top: 0.35rem;
+  font: 700 1.3125rem/1.2 var(--mao);
+  font-variation-settings: 'INFM' 90, 'BNCE' 30;
+  color: var(--vermelho);
+  overflow-wrap: anywhere;
+}
+
+.slip--mini-judge {
+  min-height: 6.5rem;
+}
+
+.slip--mini .face--judge .face-label {
+  display: none;
+}
+
+.slip--mini .judge-imp {
+  margin-top: 0.1rem;
+  font-size: 1.125rem;
+}
+
 /* ---------- votação: circular o nome com caneta vermelha ---------- */
 
 .slip--vote {
@@ -947,6 +980,7 @@ button {
   text-align: center;
   transform: translateX(-50%);
   box-shadow: 0 10px 24px rgba(6, 10, 48, 0.45);
+  pointer-events: none; /* aviso não bloqueia o botão que estiver embaixo */
 }
 
 /* ---------- folha (menus) ---------- */

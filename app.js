@@ -29,8 +29,26 @@ const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ESC[c]);
 const cleanName = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, 20);
 const maxImpostors = (n) => (n >= 9 ? 3 : n >= 6 ? 2 : 1);
+
+// Palavra escrita pelo juiz: espaços arrumados e a primeira letra maiúscula, como as da lista.
+function cleanWord(s, max = 30) {
+  const w = String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+  return w && w.charAt(0).toLocaleUpperCase('pt-BR') + w.slice(1);
+}
+
+// Modo juiz: alguém fica de fora a cada rodada, então a sala precisa de uma pessoa a mais.
+const judgeOn = (H) => !!H?.settings?.judge;
+const minPlayers = (H) => MIN_PLAYERS + (judgeOn(H) ? 1 : 0);
+const maxImpFor = (H) => maxImpostors(H.players.length - (judgeOn(H) ? 1 : 0));
+const inPlay = (r) => r.participants.filter((id) => id !== r.judge);
 const brokerUrl = (b) => (typeof b === 'number' ? (BROKERS[b] ?? BROKERS[0]) : b);
 const nameIn = (players, id) => players.find((p) => p.id === id)?.name ?? 'alguém';
+
+// Vibra só depois de a pessoa ter tocado na tela (antes disso o navegador bloqueia e reclama).
+const buzz = (ms) => {
+  if (navigator.userActivation && !navigator.userActivation.hasBeenActive) return;
+  navigator.vibrate?.(ms);
+};
 
 function joinNames(names) {
   if (names.length < 2) return names.join('');
@@ -164,14 +182,16 @@ async function publishState() {
     players: H.players.map((p) => ({ id: p.id, name: p.name, on: p.id === H.id || p.on })),
     kicked: H.kicked,
     cat: H.settings.cat,
+    hint: !!H.settings.hint,
     // Durante a rodada o estado não diz quem é o impostor nem qual é a palavra.
-    // Na votação diz só QUEM já votou; os votos aparecem na revelação.
+    // Na votação diz só QUEM já votou (e qual versão do voto chegou); os votos aparecem na revelação.
     round: r && {
       n: r.n,
       participants: r.participants,
       first: r.first,
       phase: r.phase,
-      ...(r.phase === 'voting' ? { voted: Object.keys(r.votes || {}) } : {}),
+      ...(r.judge ? { judge: r.judge, draw: r.draw } : {}),
+      ...(r.phase === 'voting' ? { voted: { ...(r.vseq || {}) } } : {}),
       ...(r.phase === 'reveal' ? { impostors: r.impostors, word: r.word, cat: r.cat, votes: r.votes || {} } : {}),
     },
   };
@@ -188,6 +208,9 @@ async function sharedFor(p) {
 
 function cardFor(id) {
   const r = S.host.round;
+  if (!r || r.phase === 'choosing') return null;
+  // O juiz fica de fora da rodada e sabe tudo: a palavra e quem é o impostor.
+  if (r.judge === id) return { t: 'card', n: r.n, role: 'judge', word: r.word, impostors: r.impostors };
   if (r.impostors.includes(id)) {
     return { t: 'card', n: r.n, role: 'impostor', multi: r.impostors.length > 1, hint: r.hint };
   }
@@ -196,7 +219,7 @@ function cardFor(id) {
 
 async function publishCard(id) {
   const H = S.host;
-  if (!H?.round || id === H.id || !net) return;
+  if (!H?.round || H.round.phase === 'choosing' || id === H.id || !net) return;
   const p = H.players.find((x) => x.id === id);
   if (!p) return;
   net.publish(T.card(id), await seal(await sharedFor(p), cardFor(id)), true);
@@ -236,17 +259,34 @@ async function hostOnMessage(topic, text) {
   } else if (m.t === 'vote' && typeof m.box === 'string') {
     const r = H.round;
     const p = H.players.find((x) => x.id === m.id);
-    if (r?.phase !== 'voting' || !p || !r.participants.includes(m.id)) return;
+    if (r?.phase !== 'voting' || !p || !r.participants.includes(m.id) || m.id === r.judge) return;
     // O voto vem cifrado com a chave só nossa e do jogador: ninguém mais lê antes da revelação.
     let v;
     try { v = await unseal(await sharedFor(p), m.box); } catch { return; }
-    if (v?.n !== r.n || v.target === m.id || !r.participants.includes(v.target)) return;
-    if (r.votes[m.id] !== v.target) {
+    if (v?.n !== r.n || v.target === m.id || v.target === r.judge || !r.participants.includes(v.target)) return;
+    const seq = Number.isFinite(v.seq) ? v.seq : 0;
+    r.vseq ??= {};
+    if (seq < (r.vseq[m.id] ?? -1)) return; // voto antigo que chegou atrasado
+    if (r.votes[m.id] !== v.target || r.vseq[m.id] !== seq) {
       r.votes[m.id] = v.target;
+      r.vseq[m.id] = seq;
       saveHost();
       render();
     }
     schedulePublish();
+  } else if (m.t === 'word' && typeof m.box === 'string') {
+    const r = H.round;
+    const p = H.players.find((x) => x.id === m.id);
+    if (r?.phase !== 'choosing' || r.judge !== m.id || !p) return;
+    // A palavra do juiz também vem cifrada só pra nós.
+    let w;
+    try { w = await unseal(await sharedFor(p), m.box); } catch { return; }
+    if (w?.n !== r.n || w.draw !== r.draw) return;
+    const word = cleanWord(w.word);
+    if (word) await finishChoosing(word, cleanWord(w.hint, 24));
+  } else if (m.t === 'pass') {
+    const r = H.round;
+    if (r?.phase === 'choosing' && r.judge === m.id && m.n === r.n && m.draw === r.draw) await redrawJudge();
   }
 }
 
@@ -256,25 +296,110 @@ async function removePlayer(id, kick) {
   H.players = H.players.filter((p) => p.id !== id);
   if (kick && !H.kicked.includes(id)) H.kicked.push(id);
   if (H.round?.votes) delete H.round.votes[id];
+  if (H.round?.vseq) delete H.round.vseq[id];
   net?.publish(T.card(id), '', true);
   saveHost();
-  await publishState();
+  // Saiu justo quem ia escolher a palavra: sorteia outro juiz.
+  if (H.round?.phase === 'choosing' && H.round.judge === id) await redrawJudge();
+  else await publishState();
   render();
 }
 
 function setSetting(key, value) {
   const H = S.host;
   if (!H) return;
-  if (key === 'impostors') value = Math.max(1, Math.min(maxImpostors(H.players.length), value));
+  if (key === 'impostors') value = Math.max(1, Math.min(maxImpFor(H), value));
   H.settings[key] = value;
   saveHost();
   schedulePublish();
   render();
 }
 
+// Sorteia o juiz em rodízio: ninguém repete até todo mundo ter sido juiz uma vez.
+function drawJudge(exclude = []) {
+  const H = S.host;
+  H.judged ??= [];
+  const ids = H.players.map((p) => p.id).filter((id) => !exclude.includes(id));
+  if (!ids.length) return null;
+  let fresh = ids.filter((id) => !H.judged.includes(id));
+  if (!fresh.length) {
+    const last = H.judged.at(-1);
+    H.judged = [];
+    fresh = ids.length > 1 ? ids.filter((id) => id !== last) : ids;
+  }
+  const id = fresh[randInt(fresh.length)];
+  H.judged.push(id);
+  return id;
+}
+
+// Modo juiz: a rodada começa sem palavra, esperando o juiz escrever.
+async function startChoosing() {
+  const H = S.host;
+  H.round = {
+    n: (H.round?.n ?? 0) + 1,
+    participants: H.players.map((p) => p.id),
+    judge: drawJudge(),
+    draw: 1,
+    impostors: [],
+    word: null,
+    cat: null,
+    hint: null,
+    first: null,
+    phase: 'choosing',
+    at: Date.now(),
+  };
+  saveHost();
+  await publishState();
+  S.hostView = 'round';
+  buzz(60);
+  render();
+}
+
+async function redrawJudge() {
+  const H = S.host;
+  const r = H?.round;
+  if (r?.phase !== 'choosing') return;
+  H.judged = (H.judged || []).filter((id) => id !== r.judge); // quem passou a vez continua na fila
+  const next = drawJudge([r.judge]);
+  if (next) {
+    r.judge = next;
+    r.draw += 1;
+    r.participants = H.players.map((p) => p.id);
+    saveHost();
+  }
+  await publishState();
+  render();
+}
+
+// O juiz mandou a palavra: sorteia o impostor entre os outros e distribui as cartas.
+async function finishChoosing(word, hint) {
+  const H = S.host;
+  const r = H?.round;
+  if (r?.phase !== 'choosing' || !word) return;
+  const participants = H.players.map((p) => p.id); // inclui quem chegou enquanto o juiz escrevia
+  const players = participants.filter((id) => id !== r.judge);
+  if (!players.length) return;
+  const nImp = Math.max(1, Math.min(H.settings.impostors, maxImpostors(players.length)));
+  Object.assign(r, {
+    participants,
+    impostors: shuffle(players).slice(0, nImp),
+    word,
+    hint: H.settings.hint ? hint || null : null,
+    first: players[randInt(players.length)],
+    phase: 'playing',
+    at: Date.now(),
+  });
+  saveHost();
+  for (const id of participants) await publishCard(id);
+  await publishState();
+  buzz(60);
+  render();
+}
+
 async function startRound() {
   const H = S.host;
-  if (!H || H.players.length < MIN_PLAYERS) return;
+  if (!H || H.players.length < minPlayers(H)) return;
+  if (judgeOn(H)) return startChoosing();
   const participants = H.players.map((p) => p.id);
   const nImp = Math.max(1, Math.min(H.settings.impostors, maxImpostors(participants.length)));
 
@@ -305,7 +430,7 @@ async function startRound() {
   for (const id of participants) await publishCard(id);
   await publishState();
   S.hostView = 'round';
-  navigator.vibrate?.(60);
+  buzz(60);
   render();
 }
 
@@ -314,6 +439,7 @@ async function openVoting() {
   if (r?.phase !== 'playing') return;
   r.phase = 'voting';
   r.votes = {};
+  r.vseq = {};
   saveHost();
   await publishState();
   render();
@@ -321,12 +447,12 @@ async function openVoting() {
 
 async function revealRound() {
   const r = S.host?.round;
-  if (!r) return;
+  if (!r || r.phase === 'choosing') return;
   r.phase = 'reveal';
   r.votes ??= {};
   saveHost();
   await publishState();
-  navigator.vibrate?.(60);
+  buzz(60);
   render();
 }
 
@@ -428,34 +554,115 @@ async function sendHello(rejoin = false) {
   net.publish(T.inbox, await seal(roomKey, hello), false);
 }
 
+// ---------- voto e palavra do juiz: mandar até o anfitrião confirmar ----------
+
 let lastVote = 0;
+let lastWord = 0;
+let retryTimer = null;
+
+// Quem já votou, no formato novo ({id: versão}) ou antigo ([id]).
+const votedIds = (r) => (Array.isArray(r?.voted) ? r.voted : Object.keys(r?.voted || {}));
+
+function votePending() {
+  const v = S.me?.vote;
+  const r = S.view?.round;
+  if (!v || r?.phase !== 'voting' || r.n !== v.n) return false;
+  if (Array.isArray(r.voted)) return !r.voted.includes(S.me.id);
+  return r.voted?.[S.me.id] !== v.seq;
+}
+
+function wordPending() {
+  const w = S.me?.judgeWord;
+  const r = S.view?.round;
+  return !!w && r?.phase === 'choosing' && r.judge === S.me.id && r.n === w.n && r.draw === w.draw;
+}
+
+// O celular pode perder a conexão no meio do caminho: reenvia até o anfitrião confirmar.
+function scheduleRetry() {
+  clearTimeout(retryTimer);
+  if (!votePending() && !wordPending()) return;
+  retryTimer = setTimeout(async () => {
+    if (votePending()) await sendVote();
+    if (wordPending()) await sendWord();
+    scheduleRetry();
+  }, 4000);
+}
 
 async function sendVote() {
   const v = S.me?.vote;
   const r = S.view?.round;
   if (!v || r?.phase !== 'voting' || r.n !== v.n || !hostKey || !net) return;
   lastVote = Date.now();
-  const box = await seal(hostKey, { n: v.n, target: v.target });
+  const box = await seal(hostKey, { n: v.n, target: v.target, seq: v.seq });
   net.publish(T.inbox, await seal(roomKey, { t: 'vote', id: S.me.id, box }), false);
+  scheduleRetry();
+}
+
+async function sendWord() {
+  const w = S.me?.judgeWord;
+  if (!wordPending() || !hostKey || !net) return;
+  lastWord = Date.now();
+  const box = await seal(hostKey, { n: w.n, draw: w.draw, word: w.word, hint: w.hint });
+  net.publish(T.inbox, await seal(roomKey, { t: 'word', id: S.me.id, box }), false);
+  scheduleRetry();
 }
 
 // Voto do anfitrião fica direto na rodada; o dos jogadores vai cifrado pro anfitrião.
 async function castVote(target) {
   if (S.mode === 'host') {
     const r = S.host?.round;
-    if (r?.phase !== 'voting' || target === S.host.id || !r.participants.includes(target)) return;
+    if (r?.phase !== 'voting' || S.host.id === r.judge || target === S.host.id || target === r.judge || !r.participants.includes(target)) return;
     r.votes[S.host.id] = target;
+    r.vseq ??= {};
+    r.vseq[S.host.id] = (r.vseq[S.host.id] ?? 0) + 1;
     saveHost();
     schedulePublish();
     render();
     return;
   }
   const r = S.view?.round;
-  if (r?.phase !== 'voting' || target === S.me.id || !r.participants.includes(target)) return;
-  S.me.vote = { n: r.n, target };
+  if (r?.phase !== 'voting' || S.me.id === r.judge || target === S.me.id || target === r.judge || !r.participants.includes(target)) return;
+  const seq = S.me.vote?.n === r.n ? (S.me.vote.seq ?? 0) + 1 : 1;
+  S.me.vote = { n: r.n, target, seq };
   saveMe();
   render();
   await sendVote();
+}
+
+// O juiz escreveu a palavra.
+async function submitWord(word, hint) {
+  if (S.mode === 'host') {
+    if (S.host.round?.judge === S.host.id) await finishChoosing(word, hint);
+    return;
+  }
+  const r = S.view?.round;
+  if (r?.phase !== 'choosing' || r.judge !== S.me.id) return;
+  S.me.judgeWord = { n: r.n, draw: r.draw, word, hint };
+  saveMe();
+  render();
+  await sendWord();
+}
+
+// O juiz não quer escolher: pede pro anfitrião sortear outra pessoa.
+async function passJudge() {
+  if (S.mode === 'host') return redrawJudge();
+  const r = S.view?.round;
+  if (r?.phase !== 'choosing' || r.judge !== S.me.id || !net) return;
+  net.publish(T.inbox, await seal(roomKey, { t: 'pass', id: S.me.id, n: r.n, draw: r.draw }), false);
+  toast('Pedido enviado. Já vão sortear outro juiz.');
+}
+
+function suggestWord() {
+  const cat = S.mode === 'host' ? S.host.settings.cat : S.view?.cat;
+  const pool = poolFor(cat || ALL.id);
+  const pick = pool[randInt(pool.length)];
+  const input = document.getElementById('palavra');
+  const theme = document.getElementById('tema');
+  if (input) {
+    input.value = pick.word;
+    input.classList.remove('is-empty');
+  }
+  if (theme) theme.value = labelFor(pick.cat);
 }
 
 async function playerOnMessage(topic, text) {
@@ -465,7 +672,8 @@ async function playerOnMessage(topic, text) {
     try { st = await unseal(roomKey, text); } catch { return; }
     if (S.view && typeof st.seq === 'number' && st.seq < S.view.seq) return; // mensagem velha
     const prevSession = S.view?.hs;
-    const prevPhase = S.view?.round && `${S.view.round.n}:${S.view.round.phase}`;
+    const phaseKey = (r) => r && `${r.n}:${r.phase}:${r.draw ?? ''}`;
+    const prevPhase = phaseKey(S.view?.round);
     S.view = st;
     if (st.host?.pub && st.host.pub !== hostPubSeen) {
       hostKey = await deriveShared(S.me.kp.priv, st.host.pub);
@@ -477,10 +685,12 @@ async function playerOnMessage(topic, text) {
       const listed = st.players?.some((p) => p.id === S.me.id);
       // O anfitrião reconectou ou ainda não nos viu: avisa que estamos aqui.
       if ((!listed || st.hs !== prevSession) && Date.now() - lastHello > 1500) sendHello();
-      // Votei, mas o anfitrião não recebeu (ex.: caiu a conexão): manda de novo.
-      if (r?.phase === 'voting' && S.me.vote?.n === r.n && !r.voted?.includes(S.me.id) && Date.now() - lastVote > 2000) sendVote();
-      if (prevPhase && r && prevPhase !== `${r.n}:${r.phase}` && r.phase !== 'playing' && r.participants.includes(S.me.id)) {
-        navigator.vibrate?.(40);
+      // Votei (ou escrevi a palavra), mas o anfitrião não recebeu: manda de novo.
+      if (votePending() && Date.now() - lastVote > 2000) sendVote();
+      if (wordPending() && Date.now() - lastWord > 2000) sendWord();
+      if (prevPhase && r && prevPhase !== phaseKey(r) && r.participants.includes(S.me.id)) {
+        // Vibra quando é a vez de agir: virou juiz, abriu a votação ou saiu o resultado.
+        if (r.phase === 'choosing' ? r.judge === S.me.id : r.phase !== 'playing') buzz(40);
       }
     }
     render();
@@ -509,7 +719,7 @@ async function openCard(text) {
   try {
     const c = await unseal(hostKey, text);
     pendingCard = null;
-    if (S.card?.n !== c.n) navigator.vibrate?.(60);
+    if (S.card?.n !== c.n) buzz(60);
     S.card = c;
   } catch {
     pendingCard = text;
@@ -540,6 +750,7 @@ function resetSession() {
   hostKey = null;
   hostPubSeen = null;
   pendingCard = null;
+  clearTimeout(retryTimer);
   Object.assign(S, {
     mode: 'home', hostView: 'lobby', conn: 'offline', host: null, invite: null,
     me: null, view: null, card: null, hostOnline: true, invalid: false,
@@ -631,13 +842,14 @@ function rosterSlip(players, myId, canKick) {
 function viewLobby() {
   const H = S.host;
   const n = H.players.length;
-  const missing = Math.max(0, MIN_PLAYERS - n);
-  const maxImp = maxImpostors(n);
+  const missing = Math.max(0, minPlayers(H) - n);
+  const maxImp = maxImpFor(H);
   const imp = Math.min(H.settings.impostors, maxImp);
   const r = H.round;
   const ready = H.broker != null;
-  const impNote = maxImp === 1 ? 'Com 6 pessoas ou mais, dá pra ter 2.' : maxImp === 2 ? 'Com 9 pessoas ou mais, dá pra ter 3.' : '';
-  const faltam = `Faltam ${missing} ${missing === 1 ? 'pessoa' : 'pessoas'}`;
+  const extra = judgeOn(H) ? 1 : 0; // o juiz não conta na rodada
+  const impNote = maxImp === 1 ? `Com ${6 + extra} pessoas ou mais, dá pra ter 2.` : maxImp === 2 ? `Com ${9 + extra} pessoas ou mais, dá pra ter 3.` : '';
+  const faltam = missing === 1 ? 'Falta 1 pessoa' : `Faltam ${missing} pessoas`;
 
   let actions;
   if (!r) {
@@ -692,30 +904,51 @@ function viewLobby() {
         <span><span class="row-title">Dica pro impostor</span><span class="row-sub">Ele fica sabendo o tema da palavra.</span></span>
         <input class="switch" type="checkbox" data-act="hint" ${H.settings.hint ? 'checked' : ''}>
       </label>
+      <label class="row">
+        <span><span class="row-title">Juiz escolhe a palavra</span><span class="row-sub">A cada rodada, alguém é sorteado pra escrever a palavra e fica de fora. Precisa de 4 pessoas.</span></span>
+        <input class="switch" type="checkbox" data-act="judge" ${judgeOn(H) ? 'checked' : ''}>
+      </label>
     </section>
 
     <div class="actions actions--sticky">${actions}</div>
   </section>`;
 }
 
-function secretSlip(card, n) {
+// O que o juiz vê ao segurar o papel: a palavra e quem é o impostor.
+function judgeFace(card, players) {
+  const names = joinNames((card.impostors || []).map((id) => nameIn(players, id)));
+  const multi = (card.impostors || []).length > 1;
+  return `<span class="face face--judge">
+       <span class="face-label">A palavra</span>
+       <span class="word">${esc(card.word)}</span>
+       <span class="judge-imp">${multi ? 'Impostores' : 'Impostor'}: <span data-judge-imps>${esc(names)}</span></span>
+     </span>`;
+}
+
+function secretSlip(card, n, players) {
   if (!card) {
     return `<div class="paper"><div class="slip slip--secret is-waiting">
       <span class="cover"><span class="cover-main">Recebendo sua palavra…</span></span>
     </div></div>`;
   }
-  const face = card.role === 'impostor'
-    ? `<span class="face face--imp">
+  const judge = card.role === 'judge';
+  let face;
+  if (judge) face = judgeFace(card, players);
+  else if (card.role === 'impostor') {
+    face = `<span class="face face--imp">
          <span class="imp">${card.multi ? 'Você é um dos impostores' : 'Você é o impostor'}</span>
          ${card.hint ? `<span class="hint">Tema: ${esc(card.hint)}</span>` : ''}
          <span class="face-note">Descubra a palavra sem se entregar.</span>
-       </span>`
-    : `<span class="face face--word">
+       </span>`;
+  } else {
+    face = `<span class="face face--word">
          <span class="face-label">Sua palavra</span>
          <span class="word">${esc(card.word)}</span>
        </span>`;
-  return `<div class="paper"><button type="button" class="slip slip--secret" data-slip aria-pressed="false" aria-label="Segure pra ver sua palavra">
-    <span class="cover"><span class="cover-main">Segure pra ver</span><span class="cover-sub">sua palavra da rodada ${n}</span></span>
+  }
+  const sub = judge ? 'a palavra e quem é o impostor' : `sua palavra da rodada ${n}`;
+  return `<div class="paper"><button type="button" class="slip slip--secret" data-slip aria-pressed="false" aria-label="Segure pra ver ${sub}">
+    <span class="cover"><span class="cover-main">Segure pra ver</span><span class="cover-sub">${sub}</span></span>
     ${face}
   </button></div>`;
 }
@@ -726,13 +959,18 @@ function viewRound(isHost) {
   const myId = isHost ? S.host.id : S.me.id;
   const card = isHost ? cardFor(S.host.id) : S.card?.n === r.n ? S.card : null;
   const first = r.first === myId ? 'Você começa.' : `Quem começa: ${esc(nameIn(players, r.first))}.`;
+  const iJudge = r.judge === myId;
+  const how = iJudge
+    ? 'Você é o juiz: está fora desta rodada. Acompanhe as dicas e, no fim, confira se o impostor acerta a palavra.'
+    : 'Cada um fala uma palavra ligada à sua, seguindo a roda. Depois de uma ou duas voltas, abram a votação.';
   return `
   <section class="screen screen--round" data-round="${r.n}">
-    <header class="top"><h1 class="title">Rodada ${r.n}</h1>${menuButton()}</header>
-    ${secretSlip(card, r.n)}
+    <header class="top"><h1 class="title">${iJudge ? `Rodada ${r.n}: você é o juiz` : `Rodada ${r.n}`}</h1>${menuButton()}</header>
+    ${secretSlip(card, r.n, players)}
     <div class="stack-tight">
       <p class="first" data-first>${first}</p>
-      <p class="muted">Cada um fala uma palavra ligada à sua, seguindo a roda. Depois de uma ou duas voltas, abram a votação.</p>
+      <p class="muted">${how}</p>
+      ${r.judge && !iJudge ? `<p class="muted" data-judge-note>${esc(nameIn(players, r.judge))} é o juiz e está fora desta rodada.</p>` : ''}
     </div>
     ${isHost
       ? `<div class="actions">
@@ -745,13 +983,16 @@ function viewRound(isHost) {
 }
 
 // Papelzinho pequeno pra relembrar a própria palavra durante a votação.
-function miniSlip(card) {
+function miniSlip(card, players) {
   if (!card) return '';
-  const face = card.role === 'impostor'
-    ? `<span class="face face--imp"><span class="imp">${card.multi ? 'Você é um dos impostores' : 'Você é o impostor'}</span></span>`
-    : `<span class="face face--word"><span class="word">${esc(card.word)}</span></span>`;
-  return `<div class="paper"><button type="button" class="slip slip--secret slip--mini" data-slip aria-pressed="false" aria-label="Segure pra lembrar sua palavra">
-    <span class="cover"><span class="cover-main">Segure pra lembrar sua palavra</span></span>
+  const judge = card.role === 'judge';
+  let face;
+  if (judge) face = judgeFace(card, players);
+  else if (card.role === 'impostor') face = `<span class="face face--imp"><span class="imp">${card.multi ? 'Você é um dos impostores' : 'Você é o impostor'}</span></span>`;
+  else face = `<span class="face face--word"><span class="word">${esc(card.word)}</span></span>`;
+  const label = judge ? 'Segure pra lembrar a palavra e o impostor' : 'Segure pra lembrar sua palavra';
+  return `<div class="paper"><button type="button" class="slip slip--secret slip--mini${judge ? ' slip--mini-judge' : ''}" data-slip aria-pressed="false" aria-label="${label}">
+    <span class="cover"><span class="cover-main">${label}</span></span>
     ${face}
   </button></div>`;
 }
@@ -760,13 +1001,14 @@ function viewVote(isHost) {
   const r = isHost ? S.host.round : S.view.round;
   const players = isHost ? S.host.players : S.view.players;
   const myId = isHost ? S.host.id : S.me.id;
+  const iJudge = r.judge === myId;
   const present = (id) => players.some((p) => p.id === id);
   const myVote = isHost ? r.votes?.[myId] : S.me.vote?.n === r.n ? S.me.vote.target : null;
-  const voted = isHost ? Object.keys(r.votes || {}) : r.voted || [];
-  const voters = r.participants.filter(present);
+  const voted = isHost ? Object.keys(r.votes || {}) : votedIds(r);
+  const voters = inPlay(r).filter(present); // o juiz não vota nem recebe voto
   const done = voters.filter((id) => voted.includes(id));
   const missing = voters.filter((id) => !voted.includes(id)).map((id) => (id === myId ? 'você' : nameIn(players, id)));
-  const options = r.participants.filter((id) => id !== myId && present(id));
+  const options = voters.filter((id) => id !== myId);
   const card = isHost ? cardFor(S.host.id) : S.card?.n === r.n ? S.card : null;
 
   const progress = !missing.length
@@ -775,20 +1017,28 @@ function viewVote(isHost) {
       ? `${done.length} de ${voters.length} votaram. Falta ${esc(joinNames(missing))}.`
       : `${done.length} de ${voters.length} votaram.`;
 
+  const ballot = iJudge
+    ? `<div class="paper"><div class="slip slip--judge">
+         <span class="slip-big">Você é o juiz</span>
+         <span class="slip-small" data-judge-novote>Nesta rodada você não vota. Só acompanha.</span>
+       </div></div>
+       <p class="muted" data-progress>${progress}</p>`
+    : `<div class="paper"><div class="slip slip--vote">
+         <p class="vote-q" id="vote-q">Quem é o impostor?</p>
+         <ul class="vote-list" role="radiogroup" aria-labelledby="vote-q">
+           ${options.map((id) => `<li><button type="button" class="vote-opt" role="radio" aria-checked="${myVote === id}" data-act="vote" data-id="${esc(id)}"><span class="nm">${esc(nameIn(players, id))}</span></button></li>`).join('')}
+         </ul>
+       </div></div>
+       <div class="stack-tight">
+         <p class="first" data-myvote>${myVote ? `Seu voto: ${esc(nameIn(players, myVote))}.` : 'Toque em quem você acha que é o impostor.'}</p>
+         <p class="muted" data-progress>${myVote ? 'Dá pra mudar até a revelação. ' : ''}${progress}</p>
+       </div>`;
+
   return `
   <section class="screen screen--vote" data-round="${r.n}">
     <header class="top"><h1 class="title">Votação da rodada ${r.n}</h1>${menuButton()}</header>
-    <div class="paper"><div class="slip slip--vote">
-      <p class="vote-q" id="vote-q">Quem é o impostor?</p>
-      <ul class="vote-list" role="radiogroup" aria-labelledby="vote-q">
-        ${options.map((id) => `<li><button type="button" class="vote-opt" role="radio" aria-checked="${myVote === id}" data-act="vote" data-id="${esc(id)}"><span class="nm">${esc(nameIn(players, id))}</span></button></li>`).join('')}
-      </ul>
-    </div></div>
-    <div class="stack-tight">
-      <p class="first" data-myvote>${myVote ? `Seu voto: ${esc(nameIn(players, myVote))}.` : 'Toque em quem você acha que é o impostor.'}</p>
-      <p class="muted" data-progress>${myVote ? 'Dá pra mudar até a revelação. ' : ''}${progress}</p>
-    </div>
-    ${miniSlip(card)}
+    ${ballot}
+    ${miniSlip(card, players)}
     ${isHost
       ? `<div class="actions">
            <button class="btn btn-primary" type="button" data-act="reveal">Revelar resultado</button>
@@ -865,15 +1115,78 @@ function viewReveal(isHost) {
     <div class="paper tilt-l drop drop--late"><div class="slip">
       <span class="face-label">A palavra era</span>
       <span class="word" data-word>${esc(r.word)}</span>
+      ${r.judge ? `<span class="slip-small" data-chosen-by>escolhida por ${esc(r.judge === myId ? 'você' : nameIn(players, r.judge))}</span>` : ''}
     </div></div>
     ${!verdict && wasMe ? `<p class="lead">${multi ? 'Você era um dos impostores.' : 'Você era o impostor.'} Enganou a roda?</p>` : ''}
     ${t.rows.length ? tallySlip(r, t, players, myId) : ''}
     ${isHost
       ? `<div class="actions">
-           <button class="btn btn-primary" type="button" data-act="start" ${S.host.players.length < MIN_PLAYERS ? 'disabled' : ''}>Próxima rodada</button>
+           <button class="btn btn-primary" type="button" data-act="start" ${S.host.players.length < minPlayers(S.host) ? 'disabled' : ''}>Próxima rodada</button>
            <button class="btn btn-ghost" type="button" data-act="lobby">Sala e QR code</button>
          </div>`
       : `<p class="muted foot">${r.participants.includes(myId) ? `Esperando ${esc(S.view.host.name)} começar a próxima rodada.` : `Você entra na próxima rodada, quando ${esc(S.view.host.name)} começar.`}</p>`}
+  </section>`;
+}
+
+// Modo juiz, antes da palavra existir: o juiz escreve, os outros esperam.
+function viewChoosing(isHost) {
+  const r = isHost ? S.host.round : S.view.round;
+  const players = isHost ? S.host.players : S.view.players;
+  const myId = isHost ? S.host.id : S.me.id;
+  if (r.judge === myId) return viewJudgePick(isHost, r);
+  const judge = players.find((p) => p.id === r.judge);
+  const note = judge && !judge.on
+    ? `${esc(judge.name)} está sem conexão.${isHost ? ' Dá pra sortear outra pessoa.' : ''}`
+    : 'Quando a palavra estiver pronta, ela aparece aqui.';
+  return `
+  <section class="screen screen--choosing" data-round="${r.n}">
+    <header class="top"><h1 class="title">Rodada ${r.n}</h1>${menuButton()}</header>
+    <div class="paper tilt-r"><div class="slip slip--judge">
+      <span class="face-label">Juiz da rodada</span>
+      <span class="slip-big" data-judge>${esc(judge?.name ?? 'alguém')}</span>
+      <span class="slip-small">está escolhendo a palavra…</span>
+    </div></div>
+    <p class="muted">${note}</p>
+    ${isHost
+      ? `<div class="actions">
+           <button class="btn btn-ghost" type="button" data-act="judge-redraw">Sortear outro juiz</button>
+           <button class="btn btn-ghost" type="button" data-act="lobby">Sala e QR code</button>
+         </div>`
+      : ''}
+  </section>`;
+}
+
+function viewJudgePick(isHost, r) {
+  const hint = isHost ? !!S.host.settings.hint : S.view.hint !== false;
+  const sent = !isHost && S.me.judgeWord?.n === r.n && S.me.judgeWord?.draw === r.draw;
+  const form = sent
+    ? `<p class="lead" data-sent>Palavra enviada. Começando a rodada…</p>`
+    : `<form class="stack" data-form="judge" novalidate>
+        <label class="field">
+          <span class="field-label">A palavra</span>
+          <input id="palavra" name="palavra" maxlength="30" required autocomplete="off" autocapitalize="sentences"
+            spellcheck="false" enterkeyhint="${hint ? 'next' : 'send'}" placeholder="Ex.: pipoca">
+        </label>
+        ${hint
+          ? `<label class="field">
+              <span class="field-label">Tema, a dica pro impostor (opcional)</span>
+              <input id="tema" name="tema" maxlength="24" autocomplete="off" autocapitalize="sentences"
+                enterkeyhint="send" placeholder="Ex.: comida">
+            </label>`
+          : ''}
+        <button class="link" type="button" data-act="suggest">Sugerir uma palavra</button>
+        <button class="btn btn-primary" type="submit">Mandar pra roda</button>
+      </form>`;
+  return `
+  <section class="screen screen--judge" data-round="${r.n}">
+    <header class="top"><h1 class="title">Rodada ${r.n}</h1>${menuButton()}</header>
+    <div class="paper tilt-l"><div class="slip slip--judge">
+      <span class="slip-big">Você é o juiz</span>
+      <span class="slip-small">desta rodada</span>
+    </div></div>
+    <p class="muted">Escreva a palavra da rodada. Você fica de fora: não recebe palavra nem vota, mas vai saber quem é o impostor.</p>
+    ${form}
+    ${sent ? '' : `<button class="btn btn-ghost" type="button" data-act="judge-pass">Passar pra outra pessoa</button>`}
   </section>`;
 }
 
@@ -922,6 +1235,7 @@ function playerScreen() {
   }
   const r = v.round;
   if (r?.phase === 'reveal') return [`reveal-${r.n}`, viewReveal(false)];
+  if (r?.phase === 'choosing') return [`choose-${r.n}-${r.draw}`, viewChoosing(false)];
   if (r && r.participants.includes(S.me.id)) {
     if (r.phase === 'voting') return [`vote-${r.n}`, viewVote(false)];
     if (r.phase === 'playing') return [`round-${r.n}`, viewRound(false)];
@@ -938,6 +1252,7 @@ function currentView() {
     if (r && S.hostView === 'round') {
       if (r.phase === 'reveal') return [`h-reveal-${r.n}`, viewReveal(true)];
       if (r.phase === 'voting') return [`h-vote-${r.n}`, viewVote(true)];
+      if (r.phase === 'choosing') return [`h-choose-${r.n}-${r.draw}`, viewChoosing(true)];
       return [`h-round-${r.n}`, viewRound(true)];
     }
     return ['h-lobby', viewLobby()];
@@ -1039,6 +1354,7 @@ const RULES = `
     <li>Depois de uma ou duas voltas, quem criou a sala abre a votação e cada um vota no celular em quem acha que é o impostor. Os votos ficam secretos até a revelação.</li>
     <li>Se o mais votado for o impostor, a roda acertou. Mas ele ainda pode tentar adivinhar a palavra pra roubar a vitória. Empate é ponto pro impostor.</li>
   </ol>
+  <p><strong>Com juiz:</strong> a cada rodada alguém é sorteado pra escrever a palavra e fica de fora. O juiz não recebe palavra e não vota, mas sabe quem é o impostor. Todo mundo é juiz uma vez antes de alguém repetir.</p>
   <button class="btn btn-primary" type="button" data-ret="ok">Entendi</button>`;
 
 const showRules = () => sheet(RULES);
@@ -1098,6 +1414,20 @@ async function confirmKick(id) {
 app.addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target;
+  if (form.dataset.form === 'judge') {
+    const input = form.elements.palavra;
+    const word = cleanWord(input?.value);
+    if (!word) {
+      input?.focus();
+      input?.classList.add('is-empty');
+      return;
+    }
+    const button = form.querySelector('button[type=submit]');
+    if (button) button.disabled = true;
+    document.activeElement?.blur?.(); // fecha o teclado
+    await submitWord(word, cleanWord(form.elements.tema?.value, 24));
+    return;
+  }
   const input = form.elements.nome;
   const name = cleanName(input?.value);
   if (!name) {
@@ -1131,8 +1461,11 @@ app.addEventListener('click', async (e) => {
     case 'round': S.hostView = 'round'; render(); break;
     case 'lobby': S.hostView = 'lobby'; render(); break;
     case 'cat': setSetting('cat', el.dataset.cat); break;
-    case 'imp': setSetting('impostors', Math.min(S.host.settings.impostors, maxImpostors(S.host.players.length)) + Number(el.dataset.d)); break;
+    case 'imp': setSetting('impostors', Math.min(S.host.settings.impostors, maxImpFor(S.host)) + Number(el.dataset.d)); break;
     case 'kick': confirmKick(el.dataset.id); break;
+    case 'suggest': suggestWord(); break;
+    case 'judge-redraw': el.disabled = true; await redrawJudge(); break;
+    case 'judge-pass': el.disabled = true; await passJudge(); break;
     case 'rejoin': await sendHello(true); break;
     case 'leave': await playerLeave(); break;
     default: break;
@@ -1141,6 +1474,15 @@ app.addEventListener('click', async (e) => {
 
 app.addEventListener('change', (e) => {
   if (e.target.dataset?.act === 'hint') setSetting('hint', e.target.checked);
+  if (e.target.dataset?.act === 'judge') setSetting('judge', e.target.checked);
+});
+
+// No campo da palavra, o "próximo" do teclado vai pro tema.
+app.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.id === 'palavra' && document.getElementById('tema')) {
+    e.preventDefault();
+    document.getElementById('tema').focus();
+  }
 });
 
 // Carta secreta: segurar mostra; soltar esconde. Um toque rápido mostra por 3 segundos.

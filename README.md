@@ -14,7 +14,11 @@ Quem cria a sala mostra um QR code no próprio celular. Os outros apontam a câm
 
 Se a turma preferir votar apontando o dedo, dá pra pular a votação e tocar em **Revelar sem votar**.
 
-Na sala dá pra escolher o tema (comida, lugares, animais, objetos, profissões, esportes e lazer, festa, transportes ou tudo), ter até 2 impostores com 6 pessoas ou mais (3 com 9 ou mais) e ligar ou desligar a dica pro impostor. Pra ver a carta, a pessoa segura o papelzinho na tela; ao soltar, ele esconde de novo.
+### Modo juiz
+
+Com **Juiz escolhe a palavra** ligado na sala, cada rodada começa sorteando um juiz. Ele escreve a palavra no próprio celular (ou toca em **Sugerir uma palavra**) e, se a dica estiver ligada, o tema que o impostor vai receber. O juiz fica de fora da rodada: não recebe palavra, não vota e ninguém vota nele, mas sabe quem é o impostor e acompanha tudo. Todo mundo é juiz uma vez antes de alguém repetir. Quem não quiser ser juiz toca em **Passar pra outra pessoa**, e quem criou a sala pode **Sortear outro juiz** a qualquer momento (por exemplo, se o celular do juiz ficar sem conexão). Com juiz, a sala precisa de pelo menos 4 pessoas.
+
+Na sala dá pra escolher o tema (comida, lugares, animais, objetos, profissões, esportes e lazer, festa, transportes ou tudo), ter até 2 impostores com 6 pessoas ou mais (3 com 9 ou mais, sem contar o juiz), ligar ou desligar a dica pro impostor e ligar o modo juiz. Pra ver a carta, a pessoa segura o papelzinho na tela; ao soltar, ele esconde de novo.
 
 ## Publicar (GitHub Pages)
 
@@ -29,7 +33,7 @@ Dica: no celular, use "Adicionar à tela inicial" pra abrir como app.
 ## Como funciona por dentro
 
 - **Site estático, sem servidor próprio.** Os celulares conversam em tempo real por um broker MQTT público, via WebSocket seguro: EMQX como principal, HiveMQ e Mosquitto de reserva. Quem cria a sala usa o primeiro que responder, e o convite leva essa escolha pra todo mundo.
-- **Criptografia de ponta a ponta.** A chave da sala viaja só no QR code, na parte do link depois do `#`, que o navegador nunca envia pra servidor nenhum. Cada carta é cifrada só pro seu dono (ECDH P-256 + AES-GCM), e os votos voltam pro anfitrião do mesmo jeito: nem o broker nem outro jogador com a chave da sala consegue ver a palavra, o papel ou o voto de ninguém antes da revelação.
+- **Criptografia de ponta a ponta.** A chave da sala viaja só no QR code, na parte do link depois do `#`, que o navegador nunca envia pra servidor nenhum. Cada carta é cifrada só pro seu dono (ECDH P-256 + AES-GCM), e os votos e a palavra do juiz voltam pro anfitrião do mesmo jeito: nem o broker nem outro jogador com a chave da sala consegue ver a palavra, o papel ou o voto de ninguém antes da revelação.
 - **Aguenta queda de conexão.** Se alguém recarrega a página, troca de app ou perde o sinal, volta pra mesma rodada com a mesma carta. A sala de quem criou fica salva no aparelho por 12 horas, e a tela fica acesa durante o jogo.
 
 | Arquivo | O que é |
@@ -41,7 +45,7 @@ Dica: no celular, use "Adicionar à tela inicial" pra abrir como app.
 | `manifest.webmanifest`, `sw.js`, `icons/` | instalar como app no celular |
 | `vendor/` | [MQTT.js](https://github.com/mqttjs/MQTT.js) e [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) (MIT) |
 | `fonts/` | Shantell Sans e Atkinson Hyperlegible Next (licença OFL) |
-| `tests/` | servidor local e teste ponta a ponta |
+| `tests/` | servidor local e testes ponta a ponta (`e2e.mjs` do jogo, `juiz.mjs` do modo juiz) |
 | `tools/make-icons.mjs` | gera os ícones |
 
 ## Rodar e testar no computador
@@ -51,10 +55,10 @@ Precisa de Node 18+ e do Google Chrome instalado (ou da variável `CHROME_PATH` 
 ```bash
 npm install
 npm run dev   # app em http://127.0.0.1:8080/?broker=ws://127.0.0.1:9001 (broker local)
-npm test      # simula o anfitrião e mais 5 jogadores e confere o jogo inteiro
+npm test      # simula o anfitrião e mais 4 ou 5 jogadores e confere o jogo inteiro
 ```
 
-O teste confere: entrada pelo convite, um impostor por rodada (e dois com 6 pessoas), mesma palavra pra todo o resto, quem começa, palavra nova a cada rodada, votação (roda acerta, roda erra, empate, mudar o voto, não votar em si mesmo, recarregar no meio), revelação com placar, tirar alguém e deixar voltar, quem chega atrasado não vota, sair, encerrar a sala e se dá pra espiar cartas ou votos pelo broker (não dá).
+O teste confere: entrada pelo convite, um impostor por rodada (e dois com 6 pessoas), mesma palavra pra todo o resto, quem começa, palavra nova a cada rodada, votação (roda acerta, roda erra, empate, mudar o voto, não votar em si mesmo, recarregar no meio), revelação com placar, tirar alguém e deixar voltar, quem chega atrasado não vota, sair, encerrar a sala e se dá pra espiar cartas ou votos pelo broker (não dá). O do modo juiz confere o sorteio e o rodízio do juiz, a palavra e o tema escritos por ele, a sugestão, passar a vez, sortear outro juiz, o anfitrião como juiz, tirar o juiz no meio da escolha, a votação sem o juiz e o sigilo da palavra dele.
 
 ## Personalizar
 

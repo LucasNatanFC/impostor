@@ -1,155 +1,12 @@
-// Teste ponta a ponta: um anfitrião e vários jogadores, cada um num "celular" separado
-// (contextos isolados do Chrome), conversando por um broker MQTT local.
+// Teste ponta a ponta do jogo: um anfitrião e vários jogadores, cada um num "celular"
+// separado, conversando por um broker MQTT local.
 //   npm install && npm test        (usa o Chrome instalado; ou defina CHROME_PATH)
-import { existsSync, mkdirSync } from 'node:fs';
-import { webcrypto } from 'node:crypto';
-import puppeteer from 'puppeteer-core';
-import mqtt from 'mqtt';
-import { startServers } from './serve.mjs';
+import { setup, openWith, sleep } from './lib.mjs';
 
-const SHOTS = new URL('./screens/', import.meta.url).pathname;
-mkdirSync(SHOTS, { recursive: true });
-
-const CHROME = process.env.CHROME_PATH || [
-  '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser',
-  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  'C:/Program Files/Google/Chrome/Application/chrome.exe',
-].find((p) => existsSync(p));
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const failures = [];
-const errors = [];
-function check(cond, msg) {
-  if (cond) console.log(`  ✓ ${msg}`);
-  else {
-    console.log(`  ✗ ${msg}`);
-    failures.push(msg);
-  }
-}
-
-const s = await startServers({ appPort: 8080, brokerPort: 9001 });
-const browser = await puppeteer.launch({
-  executablePath: CHROME,
-  headless: true,
-  args: ['--no-sandbox', '--disable-dev-shm-usage'],
-});
-
-async function phone(name) {
-  const ctx = await browser.createBrowserContext();
-  const page = await ctx.newPage();
-  await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
-  page.on('pageerror', (e) => errors.push(`${name}: ${e.message}`));
-  page.on('console', (m) => {
-    if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push(`${name}: ${m.text()}`);
-  });
-  page.setDefaultTimeout(10000);
-  return { name, ctx, page };
-}
-
-const shot = (p, file, fullPage = false) => p.page.screenshot({ path: `${SHOTS}${file}.png`, fullPage });
-const click = (p, sel) => p.page.click(sel);
-const text = (p, sel) => p.page.$eval(sel, (el) => el.textContent.trim()).catch(() => null);
-const waitText = (p, sel, value) =>
-  p.page.waitForFunction((s, v) => document.querySelector(s)?.textContent.trim() === v, {}, sel, value);
-
-async function join(p, invite) {
-  await p.page.goto(invite);
-  await p.page.waitForSelector('#nome');
-  await p.page.waitForSelector('.slip--invite .slip-big'); // já enxerga a sala antes de entrar
-  await p.page.type('#nome', p.name);
-  await click(p, 'form[data-form=join] button[type=submit]');
-  await p.page.waitForSelector('.screen--wait, .screen--reveal');
-}
-
-async function waitCard(p, n) {
-  await p.page.waitForFunction(
-    (n) => document.querySelector('.screen--round')?.dataset.round === String(n) && document.querySelector('.face'),
-    {},
-    n,
-  );
-  return p.page.evaluate(() => ({
-    word: document.querySelector('.face--word .word')?.textContent.trim() || null,
-    impostor: !!document.querySelector('.face--imp'),
-    impText: document.querySelector('.face--imp .imp')?.textContent.trim() || null,
-    hint: document.querySelector('.face--imp .hint')?.textContent.trim() || null,
-    first: document.querySelector('[data-first]')?.textContent.trim(),
-  }));
-}
-
-async function cards(phones, n) {
-  const out = {};
-  for (const p of phones) out[p.name] = await waitCard(p, n);
-  return out;
-}
-
-function checkRound(cs, nImp, label) {
-  const list = Object.entries(cs);
-  const imps = list.filter(([, c]) => c.impostor).map(([n]) => n);
-  const words = new Set(list.filter(([, c]) => !c.impostor).map(([, c]) => c.word));
-  check(imps.length === nImp, `${label}: ${nImp} impostor(es) entre ${list.length} (${imps.join(', ')})`);
-  check(words.size === 1 && !![...words][0], `${label}: todos os outros têm a mesma palavra (${[...words].join(' / ')})`);
-  const starters = list.filter(([, c]) => c.first === 'Você começa.').map(([n]) => n);
-  check(starters.length === 1, `${label}: exatamente uma pessoa começa (${starters.join(', ')})`);
-  const named = new Set(list.filter(([, c]) => c.first !== 'Você começa.').map(([, c]) => c.first));
-  check(named.size === 1 && [...named][0] === `Quem começa: ${starters[0]}.`, `${label}: todos veem a mesma pessoa começando`);
-  return { impostors: imps, word: [...words][0] };
-}
-
-// ---------- decifrar como "intruso" (só com a chave do QR code) ----------
-const unb64u = (t) => Buffer.from(t.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
-async function openWith(keyB64, payload) {
-  const key = await webcrypto.subtle.importKey('raw', unb64u(keyB64), 'AES-GCM', false, ['decrypt']);
-  const bytes = unb64u(payload);
-  const pt = await webcrypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes.subarray(0, 12) }, key, bytes.subarray(12));
-  return JSON.parse(Buffer.from(pt).toString());
-}
-
-async function snoop(room) {
-  const seen = new Map();
-  const c = mqtt.connect(s.brokerUrl);
-  await new Promise((r) => c.on('connect', r));
-  c.on('message', (topic, payload) => seen.set(topic, payload.toString()));
-  await new Promise((r) => c.subscribe(`jogo-impostor/v1/${room}/#`, r));
-  await sleep(500);
-  c.end(true);
-  return seen;
-}
-
-async function listen(room) {
-  const seen = [];
-  const c = mqtt.connect(s.brokerUrl);
-  await new Promise((r) => c.on('connect', r));
-  c.on('message', (topic, payload) => seen.push([topic, payload.toString()]));
-  await new Promise((r) => c.subscribe(`jogo-impostor/v1/${room}/#`, r));
-  return { seen, stop: () => c.end(true) };
-}
-
-const optionFor = (p, name) =>
-  p.page.waitForFunction((n) => [...document.querySelectorAll('[data-act=vote]')]
-    .find((b) => b.querySelector('.nm').textContent.trim() === n), {}, name);
-
-async function vote(p, name) {
-  await (await optionFor(p, name)).asElement().click();
-  await p.page.waitForFunction((n) => [...document.querySelectorAll('[data-act=vote]')]
-    .find((b) => b.querySelector('.nm').textContent.trim() === n)?.getAttribute('aria-checked') === 'true', {}, name);
-}
-
-const waitVoted = (p, done, total) =>
-  p.page.waitForFunction((d, t) => {
-    const el = document.querySelector('[data-progress]')?.textContent || '';
-    return d === t ? el.includes('Todo mundo já votou') : el.includes(`${d} de ${t} votaram`);
-  }, {}, done, total);
-
-async function verdictOf(p) {
-  await p.page.waitForSelector('.screen--reveal');
-  return p.page.$eval('[data-verdict]', (el) => ({ kind: el.dataset.verdict, text: el.textContent.trim() })).catch(() => null);
-}
-
-const tallyOf = (p) =>
-  p.page.$$eval('[data-tally] .tally-row', (rows) => Object.fromEntries(rows.map((r) => [
-    r.querySelector('.nm').textContent.replace(' (você)', '').trim(),
-    parseInt(r.querySelector('.n-votes').textContent, 10),
-  ])));
+const {
+  check, phone, shot, click, text, waitText, join, waitCard, cards, checkRound,
+  snoop, listen, vote, waitVoted, verdictOf, tallyOf, finish, s,
+} = await setup();
 
 try {
   console.log('\n1. Criar sala');
@@ -275,7 +132,7 @@ try {
   spy.stop();
   const lastState = [...spy.seen].reverse().find(([t, v]) => t.endsWith('/s') && v);
   const stV = await openWith(k, lastState[1]);
-  check(stV.round.phase === 'voting' && stV.round.voted.length === 4 && !stV.round.votes, 'durante a votação dá pra ver quem votou, mas não em quem');
+  check(stV.round.phase === 'voting' && Object.keys(stV.round.voted).length === 4 && !stV.round.votes, 'durante a votação dá pra ver quem votou, mas não em quem');
   let voteMsgs = 0;
   let readable = 0;
   for (const [t, v] of spy.seen) {
@@ -414,13 +271,7 @@ try {
   }
   check(true, 'todo mundo vê que a sala foi encerrada');
   await shot(ana, '13-encerrada');
+  await finish();
 } catch (err) {
-  failures.push(`erro: ${err.message}`);
-  console.error(err);
-} finally {
-  check(errors.length === 0, `sem erros de JavaScript nas páginas${errors.length ? `: ${errors.join(' | ')}` : ''}`);
-  await browser.close();
-  await s.close();
-  console.log(failures.length ? `\n${failures.length} falha(s).` : '\nTudo certo.');
-  process.exit(failures.length ? 1 : 0);
+  await finish(err);
 }
