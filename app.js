@@ -7,7 +7,7 @@ import {
   newKeyPair, deriveShared, randomId, randInt, shuffle,
 } from './net.js';
 import { CATEGORIES, ALL, poolFor, labelFor } from './words.js';
-import qrcode from './vendor/qrcode.mjs';
+import qrcode from './vendor/qrcode.js';
 
 const MIN_PLAYERS = 3;
 const ROOM_TTL = 12 * 60 * 60 * 1000; // a sala do anfitrião é retomada por até 12h
