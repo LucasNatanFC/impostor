@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Impostor</title>
+  <meta name="description" content="Jogo de roda: todo mundo recebe a mesma palavra no celular, menos o impostor.">
+  <meta name="theme-color" content="#1a2580">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Impostor">
+  <meta property="og:title" content="Impostor">
+  <meta property="og:description" content="Todo mundo recebe a mesma palavra. Menos um.">
+  <meta property="og:image" content="icons/icon-512.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="preload" href="fonts/shantell-sans.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/atkinson-hyperlegible-next.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <div id="banner" class="banner" role="status" hidden></div>
+  <main id="app" class="app"></main>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="dlg" class="sheet"></dialog>
+  <noscript>
+    <p class="noscript">O Impostor precisa de JavaScript ligado para funcionar.</p>
+  </noscript>
+</body>
+</html>
