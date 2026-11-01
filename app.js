@@ -165,12 +165,14 @@ async function publishState() {
     kicked: H.kicked,
     cat: H.settings.cat,
     // Durante a rodada o estado não diz quem é o impostor nem qual é a palavra.
+    // Na votação diz só QUEM já votou; os votos aparecem na revelação.
     round: r && {
       n: r.n,
       participants: r.participants,
       first: r.first,
       phase: r.phase,
-      ...(r.phase === 'reveal' ? { impostors: r.impostors, word: r.word, cat: r.cat } : {}),
+      ...(r.phase === 'voting' ? { voted: Object.keys(r.votes || {}) } : {}),
+      ...(r.phase === 'reveal' ? { impostors: r.impostors, word: r.word, cat: r.cat, votes: r.votes || {} } : {}),
     },
   };
   net.publish(T.state, await seal(roomKey, state), true);
@@ -231,6 +233,20 @@ async function hostOnMessage(topic, text) {
     }
   } else if (m.t === 'bye') {
     removePlayer(m.id, false);
+  } else if (m.t === 'vote' && typeof m.box === 'string') {
+    const r = H.round;
+    const p = H.players.find((x) => x.id === m.id);
+    if (r?.phase !== 'voting' || !p || !r.participants.includes(m.id)) return;
+    // O voto vem cifrado com a chave só nossa e do jogador: ninguém mais lê antes da revelação.
+    let v;
+    try { v = await unseal(await sharedFor(p), m.box); } catch { return; }
+    if (v?.n !== r.n || v.target === m.id || !r.participants.includes(v.target)) return;
+    if (r.votes[m.id] !== v.target) {
+      r.votes[m.id] = v.target;
+      saveHost();
+      render();
+    }
+    schedulePublish();
   }
 }
 
@@ -239,6 +255,7 @@ async function removePlayer(id, kick) {
   if (!H || id === H.id) return;
   H.players = H.players.filter((p) => p.id !== id);
   if (kick && !H.kicked.includes(id)) H.kicked.push(id);
+  if (H.round?.votes) delete H.round.votes[id];
   net?.publish(T.card(id), '', true);
   saveHost();
   await publishState();
@@ -292,12 +309,24 @@ async function startRound() {
   render();
 }
 
+async function openVoting() {
+  const r = S.host?.round;
+  if (r?.phase !== 'playing') return;
+  r.phase = 'voting';
+  r.votes = {};
+  saveHost();
+  await publishState();
+  render();
+}
+
 async function revealRound() {
   const r = S.host?.round;
   if (!r) return;
   r.phase = 'reveal';
+  r.votes ??= {};
   saveHost();
   await publishState();
+  navigator.vibrate?.(60);
   render();
 }
 
@@ -399,6 +428,36 @@ async function sendHello(rejoin = false) {
   net.publish(T.inbox, await seal(roomKey, hello), false);
 }
 
+let lastVote = 0;
+
+async function sendVote() {
+  const v = S.me?.vote;
+  const r = S.view?.round;
+  if (!v || r?.phase !== 'voting' || r.n !== v.n || !hostKey || !net) return;
+  lastVote = Date.now();
+  const box = await seal(hostKey, { n: v.n, target: v.target });
+  net.publish(T.inbox, await seal(roomKey, { t: 'vote', id: S.me.id, box }), false);
+}
+
+// Voto do anfitrião fica direto na rodada; o dos jogadores vai cifrado pro anfitrião.
+async function castVote(target) {
+  if (S.mode === 'host') {
+    const r = S.host?.round;
+    if (r?.phase !== 'voting' || target === S.host.id || !r.participants.includes(target)) return;
+    r.votes[S.host.id] = target;
+    saveHost();
+    schedulePublish();
+    render();
+    return;
+  }
+  const r = S.view?.round;
+  if (r?.phase !== 'voting' || target === S.me.id || !r.participants.includes(target)) return;
+  S.me.vote = { n: r.n, target };
+  saveMe();
+  render();
+  await sendVote();
+}
+
 async function playerOnMessage(topic, text) {
   if (topic === T.state) {
     if (!text) return;
@@ -406,16 +465,23 @@ async function playerOnMessage(topic, text) {
     try { st = await unseal(roomKey, text); } catch { return; }
     if (S.view && typeof st.seq === 'number' && st.seq < S.view.seq) return; // mensagem velha
     const prevSession = S.view?.hs;
+    const prevPhase = S.view?.round && `${S.view.round.n}:${S.view.round.phase}`;
     S.view = st;
     if (st.host?.pub && st.host.pub !== hostPubSeen) {
       hostKey = await deriveShared(S.me.kp.priv, st.host.pub);
       hostPubSeen = st.host.pub;
       if (pendingCard) await openCard(pendingCard);
     }
+    const r = st.round;
     if (S.me.joined && !st.closed && !st.kicked?.includes(S.me.id)) {
       const listed = st.players?.some((p) => p.id === S.me.id);
       // O anfitrião reconectou ou ainda não nos viu: avisa que estamos aqui.
       if ((!listed || st.hs !== prevSession) && Date.now() - lastHello > 1500) sendHello();
+      // Votei, mas o anfitrião não recebeu (ex.: caiu a conexão): manda de novo.
+      if (r?.phase === 'voting' && S.me.vote?.n === r.n && !r.voted?.includes(S.me.id) && Date.now() - lastVote > 2000) sendVote();
+      if (prevPhase && r && prevPhase !== `${r.n}:${r.phase}` && r.phase !== 'playing' && r.participants.includes(S.me.id)) {
+        navigator.vibrate?.(40);
+      }
     }
     render();
   } else if (topic === T.host) {
@@ -584,7 +650,7 @@ function viewLobby() {
       <button class="btn btn-ghost" type="button" data-act="round">Ver resultado da rodada ${r.n}</button>`;
   } else {
     actions = `
-      <button class="btn btn-primary" type="button" data-act="round">Voltar pra rodada ${r.n}</button>
+      <button class="btn btn-primary" type="button" data-act="round">${r.phase === 'voting' ? 'Voltar pra votação' : `Voltar pra rodada ${r.n}`}</button>
       <button class="btn btn-ghost" type="button" data-act="start" ${missing ? 'disabled' : ''}>Sortear outra rodada</button>`;
   }
 
@@ -666,15 +732,115 @@ function viewRound(isHost) {
     ${secretSlip(card, r.n)}
     <div class="stack-tight">
       <p class="first" data-first>${first}</p>
-      <p class="muted">Cada um fala uma palavra ligada à sua, seguindo a roda. Depois, votem em quem é o impostor.</p>
+      <p class="muted">Cada um fala uma palavra ligada à sua, seguindo a roda. Depois de uma ou duas voltas, abram a votação.</p>
     </div>
     ${isHost
       ? `<div class="actions">
-           <button class="btn btn-primary" type="button" data-act="reveal">Revelar impostor</button>
+           <button class="btn btn-primary" type="button" data-act="vote-open">Abrir votação</button>
+           <button class="btn btn-ghost" type="button" data-act="lobby">Sala e QR code</button>
+           <button class="link" type="button" data-act="reveal">Revelar sem votar</button>
+         </div>`
+      : `<p class="muted foot">Quando ${esc(S.view.host.name)} abrir a votação, ela aparece aqui.</p>`}
+  </section>`;
+}
+
+// Papelzinho pequeno pra relembrar a própria palavra durante a votação.
+function miniSlip(card) {
+  if (!card) return '';
+  const face = card.role === 'impostor'
+    ? `<span class="face face--imp"><span class="imp">${card.multi ? 'Você é um dos impostores' : 'Você é o impostor'}</span></span>`
+    : `<span class="face face--word"><span class="word">${esc(card.word)}</span></span>`;
+  return `<div class="paper"><button type="button" class="slip slip--secret slip--mini" data-slip aria-pressed="false" aria-label="Segure pra lembrar sua palavra">
+    <span class="cover"><span class="cover-main">Segure pra lembrar sua palavra</span></span>
+    ${face}
+  </button></div>`;
+}
+
+function viewVote(isHost) {
+  const r = isHost ? S.host.round : S.view.round;
+  const players = isHost ? S.host.players : S.view.players;
+  const myId = isHost ? S.host.id : S.me.id;
+  const present = (id) => players.some((p) => p.id === id);
+  const myVote = isHost ? r.votes?.[myId] : S.me.vote?.n === r.n ? S.me.vote.target : null;
+  const voted = isHost ? Object.keys(r.votes || {}) : r.voted || [];
+  const voters = r.participants.filter(present);
+  const done = voters.filter((id) => voted.includes(id));
+  const missing = voters.filter((id) => !voted.includes(id)).map((id) => (id === myId ? 'você' : nameIn(players, id)));
+  const options = r.participants.filter((id) => id !== myId && present(id));
+  const card = isHost ? cardFor(S.host.id) : S.card?.n === r.n ? S.card : null;
+
+  const progress = !missing.length
+    ? 'Todo mundo já votou.'
+    : missing.length <= 3
+      ? `${done.length} de ${voters.length} votaram. Falta ${esc(joinNames(missing))}.`
+      : `${done.length} de ${voters.length} votaram.`;
+
+  return `
+  <section class="screen screen--vote" data-round="${r.n}">
+    <header class="top"><h1 class="title">Votação da rodada ${r.n}</h1>${menuButton()}</header>
+    <div class="paper"><div class="slip slip--vote">
+      <p class="vote-q" id="vote-q">Quem é o impostor?</p>
+      <ul class="vote-list" role="radiogroup" aria-labelledby="vote-q">
+        ${options.map((id) => `<li><button type="button" class="vote-opt" role="radio" aria-checked="${myVote === id}" data-act="vote" data-id="${esc(id)}"><span class="nm">${esc(nameIn(players, id))}</span></button></li>`).join('')}
+      </ul>
+    </div></div>
+    <div class="stack-tight">
+      <p class="first" data-myvote>${myVote ? `Seu voto: ${esc(nameIn(players, myVote))}.` : 'Toque em quem você acha que é o impostor.'}</p>
+      <p class="muted" data-progress>${myVote ? 'Dá pra mudar até a revelação. ' : ''}${progress}</p>
+    </div>
+    ${miniSlip(card)}
+    ${isHost
+      ? `<div class="actions">
+           <button class="btn btn-primary" type="button" data-act="reveal">Revelar resultado</button>
            <button class="btn btn-ghost" type="button" data-act="lobby">Sala e QR code</button>
          </div>`
       : `<p class="muted foot">Quando ${esc(S.view.host.name)} revelar, o resultado aparece aqui.</p>`}
   </section>`;
+}
+
+// Placar da votação: quem levou quantos votos, quem foi o mais votado e se a roda acertou.
+function tally(r) {
+  const byTarget = new Map();
+  for (const [voter, target] of Object.entries(r.votes || {})) {
+    if (!byTarget.has(target)) byTarget.set(target, []);
+    byTarget.get(target).push(voter);
+  }
+  const rows = [...byTarget].map(([target, voters]) => ({ target, voters }))
+    .sort((a, b) => b.voters.length - a.voters.length);
+  if (!rows.length) return { rows, verdict: null, leader: null };
+  const leaders = rows.filter((x) => x.voters.length === rows[0].voters.length);
+  if (leaders.length > 1) return { rows, verdict: 'tie', leader: null };
+  const leader = leaders[0].target;
+  return { rows, verdict: r.impostors.includes(leader) ? 'caught' : 'missed', leader };
+}
+
+function verdictFor(r, t, myId) {
+  if (!t.verdict) return null;
+  const multi = r.impostors.length > 1;
+  const imIt = r.impostors.includes(myId);
+  if (t.verdict === 'caught') {
+    if (t.leader === myId) return ['Pegaram você!', 'Ainda dá pra roubar a vitória: tente adivinhar a palavra.'];
+    if (imIt) return ['Pegaram o outro impostor.', 'Mas você escapou!'];
+    return [multi ? 'A roda pegou um impostor!' : 'A roda acertou!', 'O impostor ainda pode tentar adivinhar a palavra pra roubar a vitória.'];
+  }
+  if (t.verdict === 'missed') {
+    if (imIt) return ['Você enganou a roda!', 'A roda votou em quem não era. Ponto pro impostor.'];
+    return [multi ? 'Os impostores enganaram a roda!' : 'O impostor enganou a roda!', 'A roda votou em quem não era.'];
+  }
+  if (imIt) return ['Deu empate. Você escapou!', 'Ponto pro impostor.'];
+  return ['Deu empate na votação.', multi ? 'Os impostores escaparam.' : 'O impostor escapou.'];
+}
+
+function tallySlip(r, t, players, myId) {
+  const who = (id) => (id === myId ? 'você' : nameIn(players, id));
+  const lines = t.rows.map(({ target, voters }) => `
+      <li class="tally-row"><span class="nm${r.impostors.includes(target) ? ' is-imp' : ''}">${esc(nameIn(players, target))}${target === myId ? ' (você)' : ''}</span><span class="n-votes">${voters.length} ${voters.length === 1 ? 'voto' : 'votos'}</span></li>
+      <li class="tally-by"><span>de ${esc(joinNames(voters.map(who)))}</span></li>`).join('');
+  return `
+    <section>
+      <h2 class="section-title">Votos</h2>
+      <div class="paper"><ul class="slip slip--list slip--tally" data-tally>${lines}</ul></div>
+    </section>`;
 }
 
 function viewReveal(isHost) {
@@ -684,9 +850,14 @@ function viewReveal(isHost) {
   const names = r.impostors.map((id) => (id === myId ? 'você' : nameIn(players, id)));
   const multi = r.impostors.length > 1;
   const wasMe = r.impostors.includes(myId);
+  const t = tally(r);
+  const verdict = verdictFor(r, t, myId);
   return `
   <section class="screen screen--reveal" data-round="${r.n}">
     <header class="top"><h1 class="title">Rodada ${r.n}</h1>${menuButton()}</header>
+    ${verdict
+      ? `<div class="verdict"><p class="verdict-main" data-verdict="${t.verdict}">${verdict[0]}</p><p class="muted">${verdict[1]}</p></div>`
+      : ''}
     <div class="paper tilt-r drop"><div class="slip slip--reveal">
       <span class="face-label">${multi ? 'Os impostores eram' : 'O impostor era'}</span>
       <span class="reveal-name" data-impostors>${esc(joinNames(names))}</span>
@@ -695,22 +866,23 @@ function viewReveal(isHost) {
       <span class="face-label">A palavra era</span>
       <span class="word" data-word>${esc(r.word)}</span>
     </div></div>
-    ${wasMe ? `<p class="lead">${multi ? 'Você era um dos impostores.' : 'Você era o impostor.'} Enganou a roda?</p>` : ''}
+    ${!verdict && wasMe ? `<p class="lead">${multi ? 'Você era um dos impostores.' : 'Você era o impostor.'} Enganou a roda?</p>` : ''}
+    ${t.rows.length ? tallySlip(r, t, players, myId) : ''}
     ${isHost
       ? `<div class="actions">
            <button class="btn btn-primary" type="button" data-act="start" ${S.host.players.length < MIN_PLAYERS ? 'disabled' : ''}>Próxima rodada</button>
            <button class="btn btn-ghost" type="button" data-act="lobby">Sala e QR code</button>
          </div>`
-      : `<p class="muted foot">Esperando ${esc(S.view.host.name)} começar a próxima rodada.</p>`}
+      : `<p class="muted foot">${r.participants.includes(myId) ? `Esperando ${esc(S.view.host.name)} começar a próxima rodada.` : `Você entra na próxima rodada, quando ${esc(S.view.host.name)} começar.`}</p>`}
   </section>`;
 }
 
 function viewWait() {
   const v = S.view;
   const r = v.round;
-  const midRound = r?.phase === 'playing' && !r.participants.includes(S.me.id);
+  const midRound = (r?.phase === 'playing' || r?.phase === 'voting') && !r.participants.includes(S.me.id);
   const lead = midRound
-    ? 'A rodada já começou. Você entra na próxima.'
+    ? `${r.phase === 'voting' ? 'A rodada está na votação.' : 'A rodada já começou.'} Você entra na próxima.`
     : `Você está na roda. Quando ${esc(v.host.name)} começar a rodada, sua palavra aparece aqui.`;
   return `
   <section class="screen screen--wait">
@@ -750,7 +922,10 @@ function playerScreen() {
   }
   const r = v.round;
   if (r?.phase === 'reveal') return [`reveal-${r.n}`, viewReveal(false)];
-  if (r?.phase === 'playing' && r.participants.includes(S.me.id)) return [`round-${r.n}`, viewRound(false)];
+  if (r && r.participants.includes(S.me.id)) {
+    if (r.phase === 'voting') return [`vote-${r.n}`, viewVote(false)];
+    if (r.phase === 'playing') return [`round-${r.n}`, viewRound(false)];
+  }
   return ['wait', viewWait()];
 }
 
@@ -761,7 +936,9 @@ function currentView() {
   if (S.mode === 'host') {
     const r = S.host.round;
     if (r && S.hostView === 'round') {
-      return r.phase === 'reveal' ? [`h-reveal-${r.n}`, viewReveal(true)] : [`h-round-${r.n}`, viewRound(true)];
+      if (r.phase === 'reveal') return [`h-reveal-${r.n}`, viewReveal(true)];
+      if (r.phase === 'voting') return [`h-vote-${r.n}`, viewVote(true)];
+      return [`h-round-${r.n}`, viewRound(true)];
     }
     return ['h-lobby', viewLobby()];
   }
@@ -859,7 +1036,8 @@ const RULES = `
     <li>Quem cria a sala mostra o QR code. Cada pessoa aponta a câmera do celular e entra com o nome.</li>
     <li>A cada rodada, todo mundo recebe a mesma palavra. Menos o impostor, que só fica sabendo que é o impostor.</li>
     <li>Começando por quem o app indicar e seguindo a roda, cada um fala uma palavra ligada à sua, sem entregar demais.</li>
-    <li>Depois de uma ou duas voltas, todo mundo vota em quem acha que é o impostor. Se a roda acertar, o impostor ainda pode tentar adivinhar a palavra pra roubar a vitória.</li>
+    <li>Depois de uma ou duas voltas, quem criou a sala abre a votação e cada um vota no celular em quem acha que é o impostor. Os votos ficam secretos até a revelação.</li>
+    <li>Se o mais votado for o impostor, a roda acertou. Mas ele ainda pode tentar adivinhar a palavra pra roubar a vitória. Empate é ponto pro impostor.</li>
   </ol>
   <button class="btn btn-primary" type="button" data-ret="ok">Entendi</button>`;
 
@@ -948,6 +1126,8 @@ app.addEventListener('click', async (e) => {
     case 'share': shareInvite(); break;
     case 'start': el.disabled = true; await startRound(); break;
     case 'reveal': el.disabled = true; await revealRound(); break;
+    case 'vote-open': el.disabled = true; await openVoting(); break;
+    case 'vote': await castVote(el.dataset.id); break;
     case 'round': S.hostView = 'round'; render(); break;
     case 'lobby': S.hostView = 'lobby'; render(); break;
     case 'cat': setSetting('cat', el.dataset.cat); break;

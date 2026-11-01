@@ -727,6 +727,104 @@ button {
   color: var(--grafite);
 }
 
+/* ---------- votação: circular o nome com caneta vermelha ---------- */
+
+.slip--vote {
+  --linha: 2.75rem; /* linhas mais altas: alvo de toque confortável */
+  display: block;
+  padding: 0.55rem 1rem 0.55rem calc(var(--margem-x) + 1rem);
+}
+
+.vote-q {
+  margin: 0;
+  height: var(--linha);
+  display: flex;
+  align-items: flex-end;
+  padding-bottom: 0.45rem;
+  font: 700 1.5rem/1 var(--mao);
+  font-variation-settings: 'INFM' 100, 'BNCE' 40;
+}
+
+.vote-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.vote-list li {
+  height: var(--linha);
+}
+
+.vote-opt {
+  display: flex;
+  align-items: flex-end;
+  width: 100%;
+  height: 100%;
+  padding: 0 0 0.45rem 0.4rem;
+  border: 0;
+  background: none;
+  color: var(--caneta);
+  text-align: left;
+  font: 600 1.375rem/1 var(--mao);
+  font-variation-settings: 'INFM' 80, 'BNCE' 30;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.vote-opt .nm {
+  position: relative;
+  white-space: nowrap;
+}
+
+/* o voto: um círculo de caneta vermelha em volta do nome */
+.vote-opt[aria-checked='true'] .nm::after {
+  content: '';
+  position: absolute;
+  inset: -0.45em -0.6em -0.3em -0.55em;
+  border: 2.5px solid var(--vermelho);
+  border-radius: 50%;
+  transform: rotate(-4deg);
+  animation: circle-in 0.22s ease-out both;
+  pointer-events: none;
+}
+
+.vote-opt:focus-visible {
+  outline-offset: -3px;
+}
+
+@keyframes circle-in {
+  from {
+    opacity: 0;
+    transform: rotate(-30deg) scale(0.7);
+  }
+}
+
+.slip--mini {
+  min-height: 4.75rem;
+  padding-top: 0.9rem;
+  padding-bottom: 0.9rem;
+}
+
+.slip--mini::after {
+  display: none;
+}
+
+.slip--mini .face {
+  inset: 0.9rem 1.25rem 0.9rem calc(var(--margem-x) + 1.1rem);
+}
+
+.slip--mini .cover-main {
+  font-size: 1.25rem;
+}
+
+.slip--mini .word {
+  font-size: 2rem;
+}
+
+.slip--mini .imp {
+  font-size: 1.5rem;
+}
+
 /* ---------- revelação ---------- */
 
 .slip--reveal {
@@ -757,6 +855,46 @@ button {
     opacity: 1;
     transform: rotate(var(--tilt, 0deg));
   }
+}
+
+.verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.verdict-main {
+  margin: 0;
+  font: 700 clamp(1.75rem, 8vw, 2.25rem)/1.1 var(--mao);
+  font-variation-settings: 'INFM' 100, 'BNCE' 40;
+  color: var(--marca);
+  text-wrap: balance;
+}
+
+.slip--tally .nm {
+  flex: 1;
+}
+
+.slip--tally .is-imp {
+  color: var(--vermelho);
+}
+
+.n-votes {
+  font: 600 1.125rem/1 var(--mao);
+  font-variation-settings: 'INFM' 70;
+  white-space: nowrap;
+}
+
+.slip--tally .tally-by {
+  font: 500 0.9375rem/1.1 var(--ui);
+  color: var(--grafite);
+}
+
+.tally-by span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---------- mensagens ---------- */

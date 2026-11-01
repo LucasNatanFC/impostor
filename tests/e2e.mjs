@@ -58,7 +58,7 @@ async function join(p, invite) {
   await p.page.waitForSelector('.slip--invite .slip-big'); // já enxerga a sala antes de entrar
   await p.page.type('#nome', p.name);
   await click(p, 'form[data-form=join] button[type=submit]');
-  await p.page.waitForSelector('.screen--wait');
+  await p.page.waitForSelector('.screen--wait, .screen--reveal');
 }
 
 async function waitCard(p, n) {
@@ -114,6 +114,42 @@ async function snoop(room) {
   c.end(true);
   return seen;
 }
+
+async function listen(room) {
+  const seen = [];
+  const c = mqtt.connect(s.brokerUrl);
+  await new Promise((r) => c.on('connect', r));
+  c.on('message', (topic, payload) => seen.push([topic, payload.toString()]));
+  await new Promise((r) => c.subscribe(`jogo-impostor/v1/${room}/#`, r));
+  return { seen, stop: () => c.end(true) };
+}
+
+const optionFor = (p, name) =>
+  p.page.waitForFunction((n) => [...document.querySelectorAll('[data-act=vote]')]
+    .find((b) => b.querySelector('.nm').textContent.trim() === n), {}, name);
+
+async function vote(p, name) {
+  await (await optionFor(p, name)).asElement().click();
+  await p.page.waitForFunction((n) => [...document.querySelectorAll('[data-act=vote]')]
+    .find((b) => b.querySelector('.nm').textContent.trim() === n)?.getAttribute('aria-checked') === 'true', {}, name);
+}
+
+const waitVoted = (p, done, total) =>
+  p.page.waitForFunction((d, t) => {
+    const el = document.querySelector('[data-progress]')?.textContent || '';
+    return d === t ? el.includes('Todo mundo já votou') : el.includes(`${d} de ${t} votaram`);
+  }, {}, done, total);
+
+async function verdictOf(p) {
+  await p.page.waitForSelector('.screen--reveal');
+  return p.page.$eval('[data-verdict]', (el) => ({ kind: el.dataset.verdict, text: el.textContent.trim() })).catch(() => null);
+}
+
+const tallyOf = (p) =>
+  p.page.$$eval('[data-tally] .tally-row', (rows) => Object.fromEntries(rows.map((r) => [
+    r.querySelector('.nm').textContent.replace(' (você)', '').trim(),
+    parseInt(r.querySelector('.n-votes').textContent, 10),
+  ])));
 
 try {
   console.log('\n1. Criar sala');
@@ -186,7 +222,7 @@ try {
     check(open && closed, `${p.name}: carta abre ao segurar e fecha ao soltar`);
   }
 
-  console.log('\n6. Revelar');
+  console.log('\n6. Revelar sem votar');
   await click(host, '[data-act=reveal]');
   for (const p of all) {
     await p.page.waitForSelector('.screen--reveal [data-impostors]');
@@ -194,6 +230,7 @@ try {
     const expected = r1.impostors[0] === p.name ? 'você' : r1.impostors[0];
     check(who === expected && (await text(p, '[data-word]')) === r1.word, `${p.name} vê o impostor (${who}) e a palavra`);
   }
+  check(!(await host.page.$('[data-verdict]')), 'sem votação, a revelação não mostra placar');
   await sleep(700);
   await shot(civ.name === 'Lucas' ? ana : civ, '07-revelacao');
 
@@ -208,13 +245,65 @@ try {
   await host.page.reload();
   await host.page.waitForSelector('.screen--round[data-round="2"] .face');
   check(true, 'anfitrião recarrega e volta pra rodada');
+
+  console.log('\n8. Votação: a roda acerta');
+  const k = hash.get('k');
+  const spy = await listen(room);
+  await click(host, '[data-act=vote-open]');
+  for (const p of all) await p.page.waitForSelector('.screen--vote');
+  check(true, 'todo mundo vai pra tela de votação');
+  const imp2 = r2.impostors[0];
+  const civs2 = all.filter((p) => p.name !== imp2);
+  const [firstCiv, ...otherCivs] = civs2;
+  check(!(await firstCiv.page.evaluate((me) => [...document.querySelectorAll('[data-act=vote] .nm')].some((n) => n.textContent.trim() === me), firstCiv.name)), 'ninguém pode votar em si mesmo');
+  await vote(firstCiv, otherCivs[0].name);
+  await vote(firstCiv, imp2); // mudou de ideia
+  for (const p of otherCivs) await vote(p, imp2);
+  const impPhone2 = all.find((p) => p.name === imp2);
+  await vote(impPhone2, firstCiv.name);
+  await waitVoted(host, 4, 4);
+  check(true, 'anfitrião vê que todo mundo votou');
+  const voteShot = civs2.find((p) => p !== host);
+  await sleep(300);
+  await shot(voteShot, '14-votacao');
+  await shot(host, '14b-votacao-anfitriao');
+  const reloader = otherCivs.find((p) => p !== host);
+  await reloader.page.reload();
+  await reloader.page.waitForFunction((n) => [...document.querySelectorAll('[data-act=vote]')]
+    .find((b) => b.querySelector('.nm').textContent.trim() === n)?.getAttribute('aria-checked') === 'true', {}, imp2);
+  check(true, `${reloader.name} recarrega no meio da votação e o voto continua marcado`);
+  spy.stop();
+  const lastState = [...spy.seen].reverse().find(([t, v]) => t.endsWith('/s') && v);
+  const stV = await openWith(k, lastState[1]);
+  check(stV.round.phase === 'voting' && stV.round.voted.length === 4 && !stV.round.votes, 'durante a votação dá pra ver quem votou, mas não em quem');
+  let voteMsgs = 0;
+  let readable = 0;
+  for (const [t, v] of spy.seen) {
+    if (!t.endsWith('/j') || !v) continue;
+    const m = await openWith(k, v).catch(() => null);
+    if (m?.t !== 'vote') continue;
+    voteMsgs++;
+    if (m.target) readable++;
+    try { await openWith(k, m.box); readable++; } catch { /* esperado */ }
+  }
+  check(voteMsgs >= 3 && readable === 0, `os ${voteMsgs} votos enviados não abrem com a chave da sala`);
   await click(host, '[data-act=reveal]');
-  await ana.page.waitForSelector('.screen--reveal');
+  for (const p of all) {
+    const v = await verdictOf(p);
+    const expected = p.name === imp2 ? 'Pegaram você!' : 'A roda acertou!';
+    check(v?.kind === 'caught' && v.text === expected, `${p.name} vê "${v?.text}"`);
+  }
+  const t2 = await tallyOf(host);
+  check(t2[imp2] === 3 && t2[firstCiv.name] === 1, `placar certo (${JSON.stringify(t2)})`);
+  await sleep(800);
+  await shot(voteShot, '15-resultado', true);
+  await shot(impPhone2, '15b-resultado-impostor');
+
   await click(host, '[data-act=start]');
   const c3 = await cards(all, 3);
   checkRound(c3, 1, 'rodada 3 (depois de o anfitrião recarregar)');
 
-  console.log('\n8. Tirar alguém da roda e entrar de novo');
+  console.log('\n9. Tirar alguém da roda e entrar de novo');
   await click(host, '[data-act=lobby]');
   await host.page.waitForSelector('.screen--lobby');
   const caioId = await host.page.$$eval('[data-act=kick]', (els, name) => els.find((e) => e.getAttribute('aria-label').includes(name))?.dataset.id, 'Caio');
@@ -233,12 +322,37 @@ try {
   const caioBack = await waitCard(caio, 3);
   check(caioBack.word === c3.Caio.word && caioBack.impostor === c3.Caio.impostor, 'Caio volta na mesma rodada com a mesma carta');
 
-  console.log('\n9. Chegou atrasado + 2 impostores');
+  console.log('\n10. Chegou atrasado');
   const dani = await phone('Dani');
   const edu = await phone('Edu');
   await join(dani, invite);
   check((await text(dani, '[data-wait]'))?.startsWith('A rodada já começou'), 'quem chega no meio da rodada espera a próxima');
   await shot(dani, '10-chegou-atrasado');
+
+  console.log('\n11. Votação empatada; quem chegou atrasado não vota');
+  await click(host, '[data-act=round]');
+  await host.page.waitForSelector('.screen--round[data-round="3"]');
+  await click(host, '[data-act=vote-open]');
+  for (const p of all) await p.page.waitForSelector('.screen--vote');
+  await dani.page.waitForFunction(() => document.querySelector('[data-wait]')?.textContent.startsWith('A rodada está na votação'));
+  check(true, 'quem chegou no meio não vota e espera a próxima');
+  check(!(await host.page.evaluate(() => [...document.querySelectorAll('[data-act=vote] .nm')].some((n) => n.textContent.trim() === 'Dani'))), 'quem chegou no meio não aparece como opção de voto');
+  await vote(host, 'Ana');
+  await vote(ana, 'Lucas');
+  await vote(bia, 'Lucas');
+  await vote(caio, 'Ana');
+  await waitVoted(host, 4, 4);
+  await click(host, '[data-act=reveal]');
+  for (const p of all) {
+    const v = await verdictOf(p);
+    check(v?.kind === 'tie', `${p.name} vê o empate ("${v?.text}")`);
+  }
+  await sleep(800);
+  await shot(dani, '16-empate-visto-por-quem-chegou', true);
+  await click(host, '[data-act=lobby]');
+  await host.page.waitForSelector('.screen--lobby');
+
+  console.log('\n12. Seis pessoas e dois impostores');
   await join(edu, invite);
   await waitText(host, '.screen--lobby .count', '6');
   await click(host, '[data-act=imp][data-d="1"]');
@@ -251,7 +365,24 @@ try {
   checkRound(c4, 2, 'rodada 4 com 6 pessoas');
   check(Object.values(c4).filter((c) => c.impostor).every((c) => c.impText === 'Você é um dos impostores'), 'com 2 impostores, a carta diz "um dos impostores"');
 
-  console.log('\n10. Sair da sala e encerrar');
+  console.log('\n13. Votação: os impostores enganam a roda');
+  await click(host, '[data-act=vote-open]');
+  for (const p of everyone) await p.page.waitForSelector('.screen--vote');
+  const imps4 = Object.entries(c4).filter(([, c]) => c.impostor).map(([n]) => n);
+  const innocents = everyone.filter((p) => !imps4.includes(p.name)).map((p) => p.name);
+  const [X, Y] = innocents;
+  for (const p of everyone) await vote(p, p.name === X ? Y : X);
+  await waitVoted(host, 6, 6);
+  await click(host, '[data-act=reveal]');
+  for (const p of everyone) {
+    const v = await verdictOf(p);
+    const expected = imps4.includes(p.name) ? 'Você enganou a roda!' : 'Os impostores enganaram a roda!';
+    check(v?.kind === 'missed' && v.text === expected, `${p.name} vê "${v?.text}"`);
+  }
+  const t4 = await tallyOf(host);
+  check(t4[X] === 5 && t4[Y] === 1, `placar com 6 pessoas (${JSON.stringify(t4)})`);
+
+  console.log('\n14. Sair da sala e encerrar');
   await click(edu, '[data-act=menu]');
   await edu.page.waitForSelector('#dlg[open] [data-ret=leave]');
   await sleep(450);
