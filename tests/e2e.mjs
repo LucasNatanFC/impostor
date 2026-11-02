@@ -2,6 +2,9 @@
 // separado, conversando por um broker MQTT local.
 //   npm install && npm test        (usa o Chrome instalado; ou defina CHROME_PATH)
 import { setup, openWith, sleep } from './lib.mjs';
+import { poolFor } from '../words.js';
+
+const inPool = (word, cat, level) => poolFor(cat, level).some((w) => w.word === word);
 
 const {
   check, phone, shot, click, text, waitText, join, waitCard, cards, checkRound,
@@ -45,6 +48,7 @@ try {
   console.log('\n3. Rodada 1');
   await click(host, '[data-act=start]');
   const r1 = checkRound(await cards(all, 1), 1, 'rodada 1');
+  check(inPool(r1.word, 'tudo', 'medio'), `sem mexer nos ajustes, a palavra é do nível médio (${r1.word})`);
 
   console.log('\n4. Privacidade');
   const room = hash.get('r');
@@ -213,13 +217,18 @@ try {
   await join(edu, invite);
   await waitText(host, '.screen--lobby .count', '6');
   await click(host, '[data-act=imp][data-d="1"]');
+  await click(host, '[data-act=cat][data-cat=animais]');
+  await click(host, '[data-act=level][data-level=impossivel]');
+  await waitText(host, '[data-level-note]', 'Ideias abstratas e coisas raras. Boa sorte.');
+  check(await host.page.$eval('[data-act=level][data-level=impossivel]', (b) => b.getAttribute('aria-pressed') === 'true'), 'dá pra escolher a dificuldade "Impossível"');
   await waitText(host, '.stepper output', '2');
   await shot(host, '10-sala-6-pessoas', true);
   await shot(host, '10b-sala-topo');
   await click(host, '[data-act=start]');
   const everyone = [host, ana, bia, caio, dani, edu];
   const c4 = await cards(everyone, 4);
-  checkRound(c4, 2, 'rodada 4 com 6 pessoas');
+  const r4 = checkRound(c4, 2, 'rodada 4 com 6 pessoas');
+  check(inPool(r4.word, 'animais', 'impossivel'), `a palavra é de Animais, nível impossível (${r4.word})`);
   check(Object.values(c4).filter((c) => c.impostor).every((c) => c.impText === 'Você é um dos impostores'), 'com 2 impostores, a carta diz "um dos impostores"');
 
   console.log('\n13. Votação: os impostores enganam a roda');

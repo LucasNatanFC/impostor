@@ -2,6 +2,7 @@
 // e fica de fora (não recebe palavra, não vota, mas sabe quem é o impostor).
 //   npm install && npm test
 import { setup, openWith, sleep } from './lib.mjs';
+import { poolFor } from '../words.js';
 
 const {
   check, phone, shot, click, text, waitText, createRoom, join, waitCard, cards, checkRound,
@@ -156,6 +157,7 @@ try {
   const suggested = await j2.page.$eval('#palavra', (el) => el.value);
   const theme = await j2.page.$eval('#tema', (el) => el.value);
   check(!!suggested && !!theme, `"Sugerir uma palavra" preenche a palavra e o tema (${suggested} / ${theme})`);
+  check(poolFor('tudo', 'medio').some((w) => w.word === suggested), 'a sugestão respeita a dificuldade escolhida (médio)');
   await shot(j2, '27-juiz-sugestao');
   await click(j2, 'form[data-form=judge] button[type=submit]');
   const c2 = await cards(all, 2);

@@ -18,7 +18,18 @@ Se a turma preferir votar apontando o dedo, dá pra pular a votação e tocar em
 
 Com **Juiz escolhe a palavra** ligado na sala, cada rodada começa sorteando um juiz. Ele escreve a palavra no próprio celular (ou toca em **Sugerir uma palavra**) e, se a dica estiver ligada, o tema que o impostor vai receber. O juiz fica de fora da rodada: não recebe palavra, não vota e ninguém vota nele, mas sabe quem é o impostor e acompanha tudo. Todo mundo é juiz uma vez antes de alguém repetir. Quem não quiser ser juiz toca em **Passar pra outra pessoa**, e quem criou a sala pode **Sortear outro juiz** a qualquer momento (por exemplo, se o celular do juiz ficar sem conexão). Com juiz, a sala precisa de pelo menos 4 pessoas.
 
-Na sala dá pra escolher o tema (comida, lugares, animais, objetos, profissões, esportes e lazer, festa, transportes ou tudo), ter até 2 impostores com 6 pessoas ou mais (3 com 9 ou mais, sem contar o juiz), ligar ou desligar a dica pro impostor e ligar o modo juiz. Pra ver a carta, a pessoa segura o papelzinho na tela; ao soltar, ele esconde de novo.
+Na sala dá pra escolher o tema (comida, lugares, animais, objetos, profissões, esportes e lazer, festa, transportes, sentimentos e ideias, ou tudo), a dificuldade das palavras, ter até 2 impostores com 6 pessoas ou mais (3 com 9 ou mais, sem contar o juiz), ligar ou desligar a dica pro impostor e ligar o modo juiz. Pra ver a carta, a pessoa segura o papelzinho na tela; ao soltar, ele esconde de novo.
+
+### Dificuldade
+
+São quase mil palavras, separadas em 4 níveis dentro de cada tema:
+
+- **Fácil:** coisas do dia a dia (pizza, praia, cachorro).
+- **Médio** (o padrão): conhecidas, mas menos óbvias (moqueca, rodoviária, capivara).
+- **Difícil:** coisas específicas e pouco comuns (vatapá, planetário, ornitorrinco).
+- **Impossível:** ideias abstratas e coisas raras, difíceis de dar dica sem entregar (déjà vu, umami, efeito borboleta).
+
+A palavra não repete até acabarem as do tema e do nível escolhidos. No modo juiz, o nível vale pras sugestões do juiz.
 
 ## Publicar (GitHub Pages)
 
@@ -41,11 +52,11 @@ Dica: no celular, use "Adicionar à tela inicial" pra abrir como app.
 | `index.html`, `styles.css` | página e visual |
 | `app.js` | telas e regras do jogo (anfitrião e jogadores) |
 | `net.js` | conexão em tempo real e criptografia |
-| `words.js` | palavras por tema |
+| `words.js` | palavras por tema e nível de dificuldade |
 | `manifest.webmanifest`, `sw.js`, `icons/` | instalar como app no celular |
 | `vendor/` | [MQTT.js](https://github.com/mqttjs/MQTT.js) e [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) (MIT) |
 | `fonts/` | Shantell Sans e Atkinson Hyperlegible Next (licença OFL) |
-| `tests/` | servidor local e testes ponta a ponta (`e2e.mjs` do jogo, `juiz.mjs` do modo juiz) |
+| `tests/` | servidor local e testes (`words.mjs` das palavras, `e2e.mjs` do jogo, `juiz.mjs` do modo juiz) |
 | `tools/make-icons.mjs` | gera os ícones |
 
 ## Rodar e testar no computador
@@ -62,7 +73,7 @@ O teste confere: entrada pelo convite, um impostor por rodada (e dois com 6 pess
 
 ## Personalizar
 
-- **Palavras:** edite as listas em `words.js`. Cada tema é uma lista simples.
+- **Palavras:** edite as listas em `words.js`. Cada tema tem uma lista por nível (`facil`, `medio`, `dificil`, `impossivel`). O `npm test` avisa se uma palavra repetir dentro do tema ou se um nível ficar com menos de 20.
 - **Cores e fontes:** variáveis no topo de `styles.css`.
 - **Servidor de mensagens:** lista `BROKERS` em `net.js`. Para colocar um novo, acrescente no fim da lista (a posição faz parte dos convites).
 

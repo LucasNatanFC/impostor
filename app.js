@@ -6,7 +6,7 @@ import {
   BROKERS, topics, connect, connectFirst, seal, unseal, newRoomKey, importRoomKey,
   newKeyPair, deriveShared, randomId, randInt, shuffle,
 } from './net.js';
-import { CATEGORIES, ALL, poolFor, labelFor } from './words.js';
+import { CATEGORIES, ALL, LEVELS, DEFAULT_LEVEL, poolFor, labelFor, levelOf } from './words.js';
 import qrcode from './vendor/qrcode.js';
 
 const MIN_PLAYERS = 3;
@@ -124,7 +124,7 @@ async function hostCreate(name) {
     seq: 0,
     players: [{ id, name, pub: kp.pub, on: true }],
     kicked: [],
-    settings: { cat: ALL.id, impostors: 1, hint: true },
+    settings: { cat: ALL.id, level: DEFAULT_LEVEL, impostors: 1, hint: true },
     used: [],
     round: null,
   };
@@ -187,6 +187,7 @@ async function publishState() {
     players: H.players.map((p) => ({ id: p.id, name: p.name, on: p.id === H.id || p.on })),
     kicked: H.kicked,
     cat: H.settings.cat,
+    level: levelOf(H.settings.level),
     hint: !!H.settings.hint,
     // Durante a rodada o estado não diz quem é o impostor nem qual é a palavra.
     // Na votação diz só QUEM já votou (e qual versão do voto chegou); os votos aparecem na revelação.
@@ -419,8 +420,8 @@ async function startRound() {
   const participants = H.players.map((p) => p.id);
   const nImp = Math.max(1, Math.min(H.settings.impostors, maxImpostors(participants.length)));
 
-  // Palavra sem repetir até acabarem as do tema.
-  const pool = poolFor(H.settings.cat);
+  // Palavra sem repetir até acabarem as do tema e do nível.
+  const pool = poolFor(H.settings.cat, H.settings.level);
   let fresh = pool.filter((w) => !H.used.includes(w.word));
   if (!fresh.length) {
     const inPool = new Set(pool.map((w) => w.word));
@@ -685,8 +686,8 @@ async function passJudge() {
 }
 
 function suggestWord() {
-  const cat = S.mode === 'host' ? S.host.settings.cat : S.view?.cat;
-  const pool = poolFor(cat || ALL.id);
+  const src = S.mode === 'host' ? S.host.settings : S.view;
+  const pool = poolFor(src?.cat || ALL.id, src?.level);
   const pick = pool[randInt(pool.length)];
   const input = document.getElementById('palavra');
   const theme = document.getElementById('tema');
@@ -877,6 +878,7 @@ function viewLobby() {
   const missing = Math.max(0, minPlayers(H) - n);
   const maxImp = maxImpFor(H);
   const imp = Math.min(H.settings.impostors, maxImp);
+  const level = levelOf(H.settings.level);
   const r = H.round;
   const ready = H.broker != null;
   const extra = judgeOn(H) ? 1 : 0; // o juiz não conta na rodada
@@ -923,6 +925,13 @@ function viewLobby() {
         <div class="chips" role="group" aria-label="Tema das palavras">
           ${[ALL, ...CATEGORIES].map((c) => `<button class="chip" type="button" data-act="cat" data-cat="${c.id}" aria-pressed="${H.settings.cat === c.id}">${c.label}</button>`).join('')}
         </div>
+      </div>
+      <div>
+        <h2 class="section-title">Dificuldade</h2>
+        <div class="chips" role="group" aria-label="Dificuldade das palavras">
+          ${LEVELS.map((l) => `<button class="chip chip--level" type="button" data-act="level" data-level="${l.id}" aria-pressed="${level === l.id}">${l.label}</button>`).join('')}
+        </div>
+        <p class="row-sub level-note" data-level-note>${LEVELS.find((l) => l.id === level).note}${judgeOn(H) ? ' No modo juiz, vale pras sugestões do juiz.' : ''}</p>
       </div>
       <div class="row">
         <div><span class="row-title">Impostores</span>${impNote ? `<span class="row-sub">${impNote}</span>` : ''}</div>
@@ -1529,6 +1538,7 @@ app.addEventListener('click', async (e) => {
     case 'round': S.hostView = 'round'; render(); break;
     case 'lobby': S.hostView = 'lobby'; render(); break;
     case 'cat': setSetting('cat', el.dataset.cat); break;
+    case 'level': setSetting('level', levelOf(el.dataset.level)); break;
     case 'imp': setSetting('impostors', Math.min(S.host.settings.impostors, maxImpFor(S.host)) + Number(el.dataset.d)); break;
     case 'kick': confirmKick(el.dataset.id); break;
     case 'suggest': suggestWord(); break;
